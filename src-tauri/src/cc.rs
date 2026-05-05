@@ -160,6 +160,71 @@ pub fn cc_delete(paths: Vec<String>) -> Result<(), String> {
     Ok(())
 }
 
+/* ── archive (multi-format reader) ──────────────────────────────────── */
+
+#[derive(Serialize, serde::Deserialize)]
+pub struct ArchiveEntry {
+    pub path: String,
+    pub size: u64,
+    pub compressed_size: u64,
+    pub mtime: u64,
+    pub is_dir: bool,
+    pub is_encrypted: bool,
+    pub is_symlink: bool,
+}
+
+#[derive(Serialize, serde::Deserialize)]
+pub struct ArchiveListing {
+    pub format: String,
+    pub count: i32,
+    pub entries: Vec<ArchiveEntry>,
+}
+
+fn run_cli_capture(args: &[&str]) -> Result<String, String> {
+    let cli = cli_path();
+    let output = Command::new(&cli)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("cli launch failed: {}", e))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[tauri::command]
+pub fn cc_archive_detect(path: String) -> Result<String, String> {
+    run_cli_capture(&["archive", "detect", &path])
+}
+
+/// Returns the listing as a parsed struct. Errors include the CLI's stderr
+/// (so the frontend can show "cannot open archive" for single-file .cute).
+#[tauri::command]
+pub fn cc_archive_list(path: String) -> Result<ArchiveListing, String> {
+    let json = run_cli_capture(&["archive", "list", &path])?;
+    serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))
+}
+
+/// Extract all entries to dest_dir, or one entry to dest_path if index is given.
+#[tauri::command]
+pub fn cc_archive_extract(
+    path: String,
+    dest: String,
+    index: Option<i32>,
+) -> CcResult {
+    let idx_str;
+    let mut args: Vec<&str> = vec!["archive", "extract", &path, "-o", &dest];
+    if let Some(i) = index {
+        idx_str = i.to_string();
+        args.push("-i");
+        args.push(&idx_str);
+    }
+    run_cli("archive_extract", &args, &path, None, Some(&dest))
+}
+
 fn run_cli(action: &str, args: &[&str], input: &str, password: Option<&str>, explicit_output: Option<&str>) -> CcResult {
     let cli = cli_path();
     let mut cmd = Command::new(&cli);

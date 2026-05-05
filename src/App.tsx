@@ -47,6 +47,31 @@ interface OutputCheck { predicted: string; exists: boolean }
 
 type LockMode = 'none' | 'fused' | 'timed' | 'delayed'
 
+interface ArchiveEntry {
+  path: string
+  size: number
+  compressed_size: number
+  mtime: number
+  is_dir: boolean
+  is_encrypted: boolean
+  is_symlink: boolean
+}
+interface ArchiveListing {
+  format: string
+  count: number
+  entries: ArchiveEntry[]
+}
+interface ArchiveBrowse {
+  path: string         // filesystem path of the archive itself
+  format: string       // "zip", "tar.gz", "cute", ...
+  entries: ArchiveEntry[]
+  curDir: string       // path within archive ("" = root)
+}
+
+const ARCHIVE_EXTS = new Set([
+  'cute', 'zip', 'tar', 'gz', 'bz2', 'xz', '7z', 'rar', 'tgz', 'tbz2', 'txz', 'press',
+])
+
 let entryId = 0
 
 export default function App() {
@@ -70,6 +95,7 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; entry: FsEntry } | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<{ mode: 'trash' | 'permanent'; files: FsEntry[] } | null>(null)
   const [inspect, setInspect] = useState<{ path: string; loading: boolean; result: CcResult | null } | null>(null)
+  const [archive, setArchive] = useState<ArchiveBrowse | null>(null)
 
   const askOverwrite = useCallback((name: string) =>
     new Promise<OverwriteChoice>((resolve) => setOverwritePrompt({ name, resolve })),
@@ -111,20 +137,93 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showHidden])
 
-  const navigate = useCallback((path: string) => { void refresh(path) }, [refresh])
+  // Sync the path bar text with archive state for the visual breadcrumb.
+  useEffect(() => {
+    if (archive) {
+      setPathInput(`${archive.path}${archive.curDir ? ' › ' + archive.curDir : ''}`)
+    } else if (listing) {
+      setPathInput(listing.path)
+    }
+  }, [archive, listing])
+
+  const navigate = useCallback((path: string) => {
+    if (archive) setArchive(null)
+    void refresh(path)
+  }, [refresh, archive])
   const goUp = useCallback(() => {
+    if (archive) {
+      if (archive.curDir) {
+        const slash = archive.curDir.lastIndexOf('/')
+        const newDir = slash >= 0 ? archive.curDir.slice(0, slash) : ''
+        setArchive({ ...archive, curDir: newDir })
+        setSelection(new Set()); setAnchor(null)
+      } else {
+        // exit archive — go back to its parent directory on disk
+        const slash = archive.path.lastIndexOf('/')
+        const parentDir = slash >= 0 ? archive.path.slice(0, slash) : archive.path
+        setArchive(null)
+        void refresh(parentDir, archive.path)
+      }
+      return
+    }
     if (listing?.parent) void refresh(listing.parent)
-  }, [listing, refresh])
+  }, [archive, listing, refresh])
+
+  // When browsing an archive, build a synthetic Listing the rest of the
+  // pipeline (sort/filter/render/select) can consume unchanged. Dir entries
+  // are inferred from path prefixes since many formats (zip, tar) don't
+  // store explicit directories.
+  const effectiveListing = useMemo<Listing | null>(() => {
+    if (!archive) return listing
+    const prefix = archive.curDir ? archive.curDir + '/' : ''
+    const seenDirs = new Set<string>()
+    const out: FsEntry[] = []
+    for (const e of archive.entries) {
+      if (!e.path.startsWith(prefix)) continue
+      const rel = e.path.slice(prefix.length)
+      if (!rel) continue
+      const slash = rel.indexOf('/')
+      if (slash >= 0) {
+        const dirName = rel.slice(0, slash)
+        if (seenDirs.has(dirName)) continue
+        seenDirs.add(dirName)
+        out.push({
+          name: dirName,
+          path: prefix + dirName,
+          is_dir: true,
+          size: 0,
+          modified: e.mtime,
+          ext: '',
+        })
+      } else if (e.is_dir) {
+        if (seenDirs.has(rel)) continue
+        seenDirs.add(rel)
+        out.push({ name: rel, path: e.path, is_dir: true, size: 0, modified: e.mtime, ext: '' })
+      } else {
+        const dot = rel.lastIndexOf('.')
+        out.push({
+          name: rel,
+          path: e.path,
+          is_dir: false,
+          size: e.size,
+          modified: e.mtime,
+          ext: dot >= 0 ? rel.slice(dot + 1).toLowerCase() : '',
+        })
+      }
+    }
+    const display = `${archive.path}${archive.curDir ? ' › ' + archive.curDir : ''}`
+    return { path: display, parent: '__archive_up__', entries: out }
+  }, [listing, archive])
 
   // Sort + filter transform — directories always first, then by selected key.
   // Filter is case-insensitive substring on the entry name.
   const sortedListing = useMemo<Listing | null>(() => {
-    if (!listing) return null
+    if (!effectiveListing) return null
     const needle = filter.trim().toLowerCase()
     const dirMul = sort.dir === 'asc' ? 1 : -1
     const filtered = needle
-      ? listing.entries.filter((e) => e.name.toLowerCase().includes(needle))
-      : listing.entries
+      ? effectiveListing.entries.filter((e) => e.name.toLowerCase().includes(needle))
+      : effectiveListing.entries
     const entries = [...filtered].sort((a, b) => {
       if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1
       let cmp = 0
@@ -133,8 +232,8 @@ export default function App() {
       else cmp = a.modified - b.modified
       return cmp * dirMul
     })
-    return { ...listing, entries }
-  }, [listing, sort, filter])
+    return { ...effectiveListing, entries }
+  }, [effectiveListing, sort, filter])
 
   const cycleSort = useCallback((key: SortKey) => {
     setSort((s) => s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' })
@@ -168,17 +267,39 @@ export default function App() {
     if (!ev.shiftKey) setAnchor(entry.path)
   }, [anchor, sortedListing])
 
-  // Double-click on a file opens it with the system default handler — like
-  // Finder. Auto-process is still available via the Auto button / menu /
-  // Cmd+Return; it just isn't triggered implicitly anymore.
+  // Double-click semantics:
+  //   - dir on filesystem → navigate into it (refresh)
+  //   - archive-extension file → try to enter archive-browse mode
+  //     (cc_archive_list); on failure (e.g. single-file .cute) fall back to
+  //     opening with the system default handler
+  //   - regular file → system default handler
+  //   - inside archive: dir → drill into curDir; file → no-op for now
+  //     (extract via the Extract action)
   const onItemOpen = useCallback(async (entry: FsEntry) => {
+    if (archive) {
+      if (entry.is_dir) {
+        setArchive({ ...archive, curDir: entry.path })
+        setSelection(new Set()); setAnchor(null)
+      }
+      return
+    }
     if (entry.is_dir) { void refresh(entry.path); return }
+    if (ARCHIVE_EXTS.has(entry.ext)) {
+      try {
+        const listing = await invoke<ArchiveListing>('cc_archive_list', { path: entry.path })
+        setArchive({ path: entry.path, format: listing.format, entries: listing.entries, curDir: '' })
+        setSelection(new Set()); setAnchor(null)
+        return
+      } catch (_e) {
+        // Not browsable as archive (likely single-file .cute) — fall through
+      }
+    }
     try {
       await invoke('cc_open', { path: entry.path })
     } catch (e) {
       setError(String(e))
     }
-  }, [refresh])
+  }, [refresh, archive])
 
   const selectedFiles = useMemo(() => {
     if (!listing) return [] as FsEntry[]
@@ -294,6 +415,42 @@ export default function App() {
       }})
     }
   }, [])
+
+  const runExtract = useCallback(async (selected?: FsEntry[]) => {
+    if (!archive) return
+    const dest = await openDialog({ directory: true, multiple: false })
+    if (!dest || typeof dest !== 'string') return
+    setBusy(true)
+    setError(null)
+    try {
+      const targets = selected && selected.length > 0 ? selected : null
+      if (targets) {
+        // Extract specific entries by their original index in the archive
+        for (let i = 0; i < targets.length; i++) {
+          const t = targets[i]
+          const idx = archive.entries.findIndex((e) => e.path === t.path)
+          if (idx < 0) continue
+          setProgress({ i: i + 1, n: targets.length, current: t.name })
+          const outPath = `${dest}/${t.name}`
+          const res = await invoke<CcResult>('cc_archive_extract', {
+            path: archive.path, dest: outPath, index: idx,
+          })
+          setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
+        }
+      } else {
+        setProgress({ i: 1, n: 1, current: basename(archive.path) })
+        const res = await invoke<CcResult>('cc_archive_extract', {
+          path: archive.path, dest, index: null,
+        })
+        setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
+      }
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+      setProgress(null)
+    }
+  }, [archive])
 
   const runDelete = useCallback(async (mode: 'trash' | 'permanent', files: FsEntry[]) => {
     if (files.length === 0) return
@@ -468,9 +625,10 @@ export default function App() {
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <PathBar
         path={pathInput}
-        canUp={!!listing?.parent}
+        canUp={!!listing?.parent || !!archive}
         showHidden={showHidden}
         filter={filter}
+        archiveFormat={archive?.format}
         onChange={setPathInput}
         onSubmit={() => navigate(pathInput)}
         onUp={goUp}
@@ -523,8 +681,11 @@ export default function App() {
             progress={progress}
             level={compressLevel}
             setLevel={setCompressLevel}
+            archiveMode={!!archive}
+            archiveFormat={archive?.format}
             onRun={runOnSelection}
             onArchive={() => setArchiveOpen(true)}
+            onExtract={() => runExtract(selectedFiles.length > 0 ? selectedFiles : undefined)}
           />
         </main>
       </div>
@@ -598,12 +759,14 @@ function archiveDefaultOutput(files: FsEntry[], cwd: string): string {
   return `${dir}/archive.cute`
 }
 
-function PathBar({ path, canUp, showHidden, filter, onChange, onSubmit, onUp, onToggleHidden, onFilter }: {
+function PathBar({ path, canUp, showHidden, filter, archiveFormat, onChange, onSubmit, onUp, onToggleHidden, onFilter }: {
   path: string; canUp: boolean; showHidden: boolean
   filter: string
+  archiveFormat?: string
   onChange: (s: string) => void; onSubmit: () => void; onUp: () => void; onToggleHidden: () => void
   onFilter: (s: string) => void
 }) {
+  const inArchive = !!archiveFormat
   return (
     <div className="titlebar" style={{
       display: 'flex', alignItems: 'center', gap: 8,
@@ -618,15 +781,28 @@ function PathBar({ path, canUp, showHidden, filter, onChange, onSubmit, onUp, on
       }}>
         <span style={{ fontSize: 14 }}>◆</span>cc-gui
       </div>
-      <button onClick={onUp} disabled={!canUp} title="Parent (⌘↑)" style={iconBtn}>↑</button>
+      <button onClick={onUp} disabled={!canUp}
+        title={inArchive ? 'Up (⌘↑) — leave archive at root' : 'Parent (⌘↑)'}
+        style={iconBtn}>↑</button>
+      {inArchive && (
+        <span style={{
+          fontSize: 9.5, fontWeight: 700, letterSpacing: '0.07em',
+          padding: '3px 7px', borderRadius: 4,
+          background: 'rgba(56,189,248,0.16)', color: 'var(--accent-blue)',
+          textTransform: 'uppercase', userSelect: 'none',
+        }}>{archiveFormat}</span>
+      )}
       <input
         value={path}
+        readOnly={inArchive}
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter') onSubmit() }}
         spellCheck={false}
         style={{
-          flex: 1, minWidth: 0, background: 'var(--surface-2)', color: 'var(--text)',
-          border: '1px solid var(--border)', borderRadius: 6,
+          flex: 1, minWidth: 0, background: 'var(--surface-2)',
+          color: inArchive ? 'var(--accent-blue)' : 'var(--text)',
+          border: `1px solid ${inArchive ? 'rgba(56,189,248,0.35)' : 'var(--border)'}`,
+          borderRadius: 6,
           padding: '6px 10px', fontSize: 12, outline: 'none',
           fontFamily: "'SF Mono', monospace",
         }}
@@ -843,14 +1019,17 @@ function FileList({ listing, selection, sort, onSort, onClick, onOpen, onContext
   )
 }
 
-function ActionBar({ count, sample, password, setPassword, busy, progress, level, setLevel, onRun, onArchive }: {
+function ActionBar({ count, sample, password, setPassword, busy, progress, level, setLevel, archiveMode, archiveFormat, onRun, onArchive, onExtract }: {
   count: number; sample?: string; password: string; setPassword: (s: string) => void
   busy: boolean
   progress: Progress | null
   level: number
   setLevel: (n: number) => void
+  archiveMode: boolean
+  archiveFormat?: string
   onRun: (a: 'compress' | 'decompress' | 'lock' | 'unlock' | 'auto') => void
   onArchive: () => void
+  onExtract: () => void
 }) {
   const disabled = count === 0 || busy
   const archiveDisabled = count < 2 || busy
@@ -859,6 +1038,11 @@ function ActionBar({ count, sample, password, setPassword, busy, progress, level
         ? `${progress.i}/${progress.n} · ${progress.current}`
         : `Working · ${progress.current}`)
     : busy ? 'Working…'
+    : archiveMode
+      ? (count === 0
+          ? `Browsing ${archiveFormat ?? 'archive'} · Extract all, or select entries to extract`
+          : count === 1 ? `1 entry selected · ${sample}`
+          : `${count} entries selected`)
     : count === 0 ? 'No selection · ⏎ open · ⌘↑ parent · ⌘A all'
     : count === 1 ? `1 file selected · ${sample}`
     : `${count} files selected`
@@ -887,27 +1071,37 @@ function ActionBar({ count, sample, password, setPassword, busy, progress, level
         />
       </div>
       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-        <ActionButton label="Auto" hint="compress raw · decompress .cute"
-          tone="blue" disabled={disabled} onClick={() => onRun('auto')} />
-        <ActionButton label="Compress" disabled={disabled} onClick={() => onRun('compress')} />
-        <select value={level} onChange={(e) => setLevel(parseInt(e.target.value, 10))}
-          title="Compression level (1 fastest · 9 smallest)"
-          style={{
-            background: 'var(--surface-2)', color: 'var(--text)',
-            border: '1px solid var(--border)', borderRadius: 6,
-            padding: '5px 6px', fontSize: 11, outline: 'none',
-            fontFamily: "'SF Mono', monospace",
-          }}>
-          {[1,2,3,4,5,6,7,8,9].map((l) => <option key={l} value={l}>L{l}</option>)}
-        </select>
-        <ActionButton label="Decompress" disabled={disabled} onClick={() => onRun('decompress')} />
-        <ActionButton label="Lock" tone="rose"
-          disabled={disabled || !password} onClick={() => onRun('lock')} />
-        <ActionButton label="Unlock" tone="rose"
-          disabled={disabled || !password} onClick={() => onRun('unlock')} />
-        <div style={{ flex: 1 }} />
-        <ActionButton label="Archive…" tone="blue" hint="Bundle ≥2 files into one .cute"
-          disabled={archiveDisabled} onClick={onArchive} />
+        {archiveMode ? (
+          <>
+            <ActionButton label={count > 0 ? `Extract ${count}…` : 'Extract All…'}
+              tone="blue" disabled={busy} onClick={onExtract} />
+            <div style={{ flex: 1 }} />
+          </>
+        ) : (
+          <>
+            <ActionButton label="Auto" hint="compress raw · decompress .cute"
+              tone="blue" disabled={disabled} onClick={() => onRun('auto')} />
+            <ActionButton label="Compress" disabled={disabled} onClick={() => onRun('compress')} />
+            <select value={level} onChange={(e) => setLevel(parseInt(e.target.value, 10))}
+              title="Compression level (1 fastest · 9 smallest)"
+              style={{
+                background: 'var(--surface-2)', color: 'var(--text)',
+                border: '1px solid var(--border)', borderRadius: 6,
+                padding: '5px 6px', fontSize: 11, outline: 'none',
+                fontFamily: "'SF Mono', monospace",
+              }}>
+              {[1,2,3,4,5,6,7,8,9].map((l) => <option key={l} value={l}>L{l}</option>)}
+            </select>
+            <ActionButton label="Decompress" disabled={disabled} onClick={() => onRun('decompress')} />
+            <ActionButton label="Lock" tone="rose"
+              disabled={disabled || !password} onClick={() => onRun('lock')} />
+            <ActionButton label="Unlock" tone="rose"
+              disabled={disabled || !password} onClick={() => onRun('unlock')} />
+            <div style={{ flex: 1 }} />
+            <ActionButton label="Archive…" tone="blue" hint="Bundle ≥2 files into one .cute"
+              disabled={archiveDisabled} onClick={onArchive} />
+          </>
+        )}
       </div>
     </div>
   )
