@@ -38,6 +38,13 @@ type SortDir = 'asc' | 'desc'
 
 interface Progress { i: number; n: number; current: string }
 
+type OverwriteChoice = 'replace' | 'skip' | 'replace_all' | 'skip_all' | 'cancel'
+type StickyChoice = 'replace_all' | 'skip_all' | null
+
+interface OutputCheck { predicted: string; exists: boolean }
+
+type LockMode = 'none' | 'fused' | 'timed' | 'delayed'
+
 let entryId = 0
 
 export default function App() {
@@ -54,6 +61,15 @@ export default function App() {
   const [showHidden, setShowHidden] = useState(false)
   const [pathInput, setPathInput] = useState('')
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'name', dir: 'asc' })
+  const [overwritePrompt, setOverwritePrompt] = useState<{ name: string; resolve: (c: OverwriteChoice) => void } | null>(null)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+
+  const askOverwrite = useCallback((name: string) =>
+    new Promise<OverwriteChoice>((resolve) => setOverwritePrompt({ name, resolve })),
+  [])
+  const resolveOverwrite = useCallback((choice: OverwriteChoice) => {
+    setOverwritePrompt((cur) => { cur?.resolve(choice); return null })
+  }, [])
 
   const cwd = listing?.path ?? ''
 
@@ -145,6 +161,18 @@ export default function App() {
     setBusy(true)
     setProgress({ i: 1, n: 1, current: entry.name })
     try {
+      const actionKey = entry.path.toLowerCase().endsWith('.cute') ? 'decompress' : 'compress'
+      const check = await invoke<OutputCheck>('cc_check_output', { action: actionKey, input: entry.path })
+      if (check.exists) {
+        const choice = await askOverwrite(basename(check.predicted))
+        if (choice === 'cancel' || choice === 'skip' || choice === 'skip_all') {
+          setHistory((h) => [{
+            id: ++entryId, action: actionKey, input: entry.path, output: '',
+            stdout: '', stderr: `skipped: would overwrite ${basename(check.predicted)}`, success: false,
+          }, ...h].slice(0, 50))
+          return
+        }
+      }
       const res = await invoke<CcResult>('cc_auto', { path: entry.path })
       setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
       const selectAfter = res.success && res.output ? res.output : undefined
@@ -155,7 +183,7 @@ export default function App() {
       setBusy(false)
       setProgress(null)
     }
-  }, [cwd, refresh])
+  }, [cwd, refresh, askOverwrite])
 
   const selectedFiles = useMemo(() => {
     if (!listing) return [] as FsEntry[]
@@ -171,10 +199,38 @@ export default function App() {
     setError(null)
     setBusy(true)
     let lastOutput: string | undefined
+    let sticky: StickyChoice = null
     try {
       for (let i = 0; i < selectedFiles.length; i++) {
         const f = selectedFiles[i]
         setProgress({ i: i + 1, n: selectedFiles.length, current: f.name })
+        const actionKey =
+          action === 'auto'
+            ? (f.path.toLowerCase().endsWith('.cute') ? 'decompress' : 'compress')
+            : action
+
+        const check = await invoke<OutputCheck>('cc_check_output', { action: actionKey, input: f.path })
+        let proceed = true
+        if (check.exists) {
+          if (sticky === 'replace_all') proceed = true
+          else if (sticky === 'skip_all') proceed = false
+          else {
+            const choice = await askOverwrite(basename(check.predicted))
+            if (choice === 'cancel') break
+            if (choice === 'skip') proceed = false
+            else if (choice === 'replace') proceed = true
+            else if (choice === 'replace_all') { sticky = 'replace_all'; proceed = true }
+            else if (choice === 'skip_all') { sticky = 'skip_all'; proceed = false }
+          }
+        }
+        if (!proceed) {
+          setHistory((h) => [{
+            id: ++entryId, action: actionKey, input: f.path, output: '',
+            stdout: '', stderr: `skipped: would overwrite ${basename(check.predicted)}`, success: false,
+          }, ...h].slice(0, 50))
+          continue
+        }
+
         const cmd =
           action === 'auto' ? 'cc_auto' :
           action === 'compress' ? 'cc_compress' :
@@ -195,7 +251,39 @@ export default function App() {
       setBusy(false)
       setProgress(null)
     }
-  }, [selectedFiles, password, cwd, refresh])
+  }, [selectedFiles, password, cwd, refresh, askOverwrite])
+
+  const runArchive = useCallback(async (params: {
+    output: string; password?: string; lockMode: LockMode; lockValue?: number
+  }) => {
+    if (selectedFiles.length === 0) return
+    setError(null)
+    const exists = await invoke<boolean>('cc_path_exists', { path: params.output })
+    if (exists) {
+      const choice = await askOverwrite(basename(params.output))
+      if (choice !== 'replace' && choice !== 'replace_all') return
+    }
+    setBusy(true)
+    setProgress({ i: 1, n: 1, current: basename(params.output) })
+    try {
+      const res = await invoke<CcResult>('cc_archive', {
+        paths: selectedFiles.map((f) => f.path),
+        output: params.output,
+        password: params.password ?? null,
+        lockMode: params.lockMode === 'none' ? null : params.lockMode,
+        lockValue: params.lockMode === 'none' ? null : params.lockValue ?? null,
+      })
+      setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
+      const selectAfter = res.success && res.output ? res.output : undefined
+      await refresh(cwd, selectAfter)
+      if (res.success) setArchiveOpen(false)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+      setProgress(null)
+    }
+  }, [selectedFiles, cwd, refresh, askOverwrite])
 
   // OS-level drag-drop into the window: enter and process
   useEffect(() => {
@@ -213,10 +301,33 @@ export default function App() {
       }
       setBusy(true)
       let lastOutput: string | undefined
+      let sticky: StickyChoice = null
       try {
         for (let i = 0; i < paths.length; i++) {
           const p = paths[i]
           setProgress({ i: i + 1, n: paths.length, current: basename(p) })
+          const actionKey = p.toLowerCase().endsWith('.cute') ? 'decompress' : 'compress'
+          const check = await invoke<OutputCheck>('cc_check_output', { action: actionKey, input: p })
+          let proceed = true
+          if (check.exists) {
+            if (sticky === 'replace_all') proceed = true
+            else if (sticky === 'skip_all') proceed = false
+            else {
+              const choice = await askOverwrite(basename(check.predicted))
+              if (choice === 'cancel') break
+              if (choice === 'skip') proceed = false
+              else if (choice === 'replace') proceed = true
+              else if (choice === 'replace_all') { sticky = 'replace_all'; proceed = true }
+              else if (choice === 'skip_all') { sticky = 'skip_all'; proceed = false }
+            }
+          }
+          if (!proceed) {
+            setHistory((h) => [{
+              id: ++entryId, action: actionKey, input: p, output: '',
+              stdout: '', stderr: `skipped: would overwrite ${basename(check.predicted)}`, success: false,
+            }, ...h].slice(0, 50))
+            continue
+          }
           const res = await invoke<CcResult>('cc_auto', { path: p })
           setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
           if (res.success && res.output) lastOutput = res.output
@@ -230,7 +341,7 @@ export default function App() {
       }
     })
     return () => { void unlisten.then((f) => f()) }
-  }, [cwd, showHidden, refresh])
+  }, [cwd, showHidden, refresh, askOverwrite])
 
   // Keyboard shortcuts. Skip when focus is in an input — typing should be free.
   useEffect(() => {
@@ -312,11 +423,32 @@ export default function App() {
             busy={busy}
             progress={progress}
             onRun={runOnSelection}
+            onArchive={() => setArchiveOpen(true)}
           />
         </main>
       </div>
+
+      {overwritePrompt && (
+        <OverwritePrompt name={overwritePrompt.name} onChoice={resolveOverwrite} />
+      )}
+      {archiveOpen && (
+        <ArchiveModal
+          files={selectedFiles}
+          defaultOutput={archiveDefaultOutput(selectedFiles, cwd)}
+          busy={busy}
+          onSubmit={runArchive}
+          onCancel={() => setArchiveOpen(false)}
+        />
+      )}
     </div>
   )
+}
+
+function archiveDefaultOutput(files: FsEntry[], cwd: string): string {
+  const dir = files[0]
+    ? files[0].path.slice(0, files[0].path.lastIndexOf('/'))
+    : cwd
+  return `${dir}/archive.cute`
 }
 
 function PathBar({ path, canUp, showHidden, onChange, onSubmit, onUp, onToggleHidden }: {
@@ -548,13 +680,15 @@ function FileList({ listing, selection, sort, onSort, onClick, onOpen }: {
   )
 }
 
-function ActionBar({ count, sample, password, setPassword, busy, progress, onRun }: {
+function ActionBar({ count, sample, password, setPassword, busy, progress, onRun, onArchive }: {
   count: number; sample?: string; password: string; setPassword: (s: string) => void
   busy: boolean
   progress: Progress | null
   onRun: (a: 'compress' | 'decompress' | 'lock' | 'unlock' | 'auto') => void
+  onArchive: () => void
 }) {
   const disabled = count === 0 || busy
+  const archiveDisabled = count < 2 || busy
   const status = busy && progress
     ? (progress.n > 1
         ? `${progress.i}/${progress.n} · ${progress.current}`
@@ -596,6 +730,9 @@ function ActionBar({ count, sample, password, setPassword, busy, progress, onRun
           disabled={disabled || !password} onClick={() => onRun('lock')} />
         <ActionButton label="Unlock" tone="rose"
           disabled={disabled || !password} onClick={() => onRun('unlock')} />
+        <div style={{ flex: 1 }} />
+        <ActionButton label="Archive…" tone="blue" hint="Bundle ≥2 files into one .cute"
+          disabled={archiveDisabled} onClick={onArchive} />
       </div>
     </div>
   )
@@ -679,6 +816,164 @@ function StatusBar({ listing, selectedFiles }: { listing: Listing | null; select
       </>}
     </div>
   )
+}
+
+/* ── modals ──────────────────────────────────────────────────────────── */
+
+function ModalShell({ title, onClose, children, width = 420 }: {
+  title: string; onClose: () => void; children: React.ReactNode; width?: number
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 100,
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      background: 'rgba(0,0,0,0.45)', backdropFilter: 'blur(2px)',
+    }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        width, maxWidth: '92vw', maxHeight: '88vh',
+        display: 'flex', flexDirection: 'column',
+        background: 'var(--surface)', color: 'var(--text)',
+        border: '1px solid var(--border)', borderRadius: 10,
+        boxShadow: '0 18px 50px rgba(0,0,0,0.55)',
+        overflow: 'hidden',
+      }}>
+        <div style={{
+          padding: '10px 14px', borderBottom: '1px solid var(--border)',
+          fontSize: 12.5, fontWeight: 600, letterSpacing: '0.02em',
+        }}>{title}</div>
+        <div style={{ padding: '14px', overflow: 'auto' }}>{children}</div>
+      </div>
+    </div>
+  )
+}
+
+function OverwritePrompt({ name, onChoice }: {
+  name: string; onChoice: (c: OverwriteChoice) => void
+}) {
+  return (
+    <ModalShell title="File already exists" onClose={() => onChoice('cancel')}>
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, marginBottom: 14 }}>
+        <div style={{ marginBottom: 6 }}>Output already exists:</div>
+        <div className="mono" style={{
+          padding: '6px 8px', borderRadius: 6, background: 'var(--bg)',
+          color: 'var(--accent)', fontSize: 11.5, wordBreak: 'break-all',
+        }}>{name}</div>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, justifyContent: 'flex-end' }}>
+        <ActionButton label="Cancel" disabled={false} onClick={() => onChoice('cancel')} />
+        <ActionButton label="Skip" disabled={false} onClick={() => onChoice('skip')} />
+        <ActionButton label="Skip all" disabled={false} onClick={() => onChoice('skip_all')} />
+        <ActionButton label="Replace all" tone="rose" disabled={false} onClick={() => onChoice('replace_all')} />
+        <ActionButton label="Replace" tone="rose" disabled={false} onClick={() => onChoice('replace')} />
+      </div>
+    </ModalShell>
+  )
+}
+
+function ArchiveModal({ files, defaultOutput, busy, onSubmit, onCancel }: {
+  files: FsEntry[]
+  defaultOutput: string
+  busy: boolean
+  onSubmit: (p: { output: string; password?: string; lockMode: LockMode; lockValue?: number }) => void
+  onCancel: () => void
+}) {
+  const [output, setOutput] = useState(defaultOutput)
+  const [pwd, setPwd] = useState('')
+  const [mode, setMode] = useState<LockMode>('none')
+  const [val, setVal] = useState<number>(1)
+  const totalBytes = files.reduce((a, f) => a + f.size, 0)
+
+  const submit = () => {
+    if (!output.trim()) return
+    onSubmit({
+      output: output.trim(),
+      password: pwd || undefined,
+      lockMode: mode,
+      lockValue: mode === 'none' ? undefined : Math.max(1, Math.floor(val || 1)),
+    })
+  }
+
+  return (
+    <ModalShell title="Create archive" onClose={onCancel} width={520}>
+      <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 10 }}>
+        Bundle {files.length} files ({formatSize(totalBytes)}) into a single
+        depo container with the ARCV trailer.
+      </div>
+      <div style={{
+        maxHeight: 110, overflow: 'auto', borderRadius: 6,
+        border: '1px solid var(--border)', background: 'var(--bg)',
+        padding: '6px 8px', marginBottom: 12, fontSize: 11.5, lineHeight: 1.5,
+      }}>
+        {files.map((f) => (
+          <div key={f.path} className="mono" style={{
+            color: 'var(--text-dim)', wordBreak: 'break-all',
+          }}>{f.name}</div>
+        ))}
+      </div>
+
+      <Field label="Output path">
+        <input value={output} onChange={(e) => setOutput(e.target.value)}
+          spellCheck={false} style={modalInput} />
+      </Field>
+
+      <Field label="Password (optional)">
+        <input type="password" value={pwd} onChange={(e) => setPwd(e.target.value)}
+          placeholder="leave empty for unencrypted archive" style={modalInput} />
+      </Field>
+
+      <Field label="Lock mode">
+        <div style={{ display: 'flex', gap: 8 }}>
+          <select value={mode} onChange={(e) => setMode(e.target.value as LockMode)}
+            style={{ ...modalInput, flex: 1 }}>
+            <option value="none">none</option>
+            <option value="fused">fused (max decryptions)</option>
+            <option value="timed">timed (valid epochs)</option>
+            <option value="delayed">delayed (delay seconds)</option>
+          </select>
+          {mode !== 'none' && (
+            <input type="number" min={1} value={val}
+              onChange={(e) => setVal(parseInt(e.target.value || '1', 10))}
+              style={{ ...modalInput, width: 110 }} />
+          )}
+        </div>
+        {mode !== 'none' && (
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-dim)' }}>
+            Lock modes require CLI support — the cutecontainer CLI may reject
+            unknown flags. Surface stderr will show what's missing.
+          </div>
+        )}
+      </Field>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+        <ActionButton label="Cancel" disabled={busy} onClick={onCancel} />
+        <ActionButton label="Create" tone="blue" disabled={busy || !output.trim()} onClick={submit} />
+      </div>
+    </ModalShell>
+  )
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{
+        fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase',
+        letterSpacing: '0.07em', marginBottom: 4,
+      }}>{label}</div>
+      {children}
+    </div>
+  )
+}
+
+const modalInput: React.CSSProperties = {
+  width: '100%', background: 'var(--surface-2)', color: 'var(--text)',
+  border: '1px solid var(--border)', borderRadius: 6,
+  padding: '6px 10px', fontSize: 12, outline: 'none',
+  fontFamily: "'SF Mono', monospace",
 }
 
 /* ── helpers ─────────────────────────────────────────────────────────── */

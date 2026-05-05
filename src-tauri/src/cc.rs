@@ -59,18 +59,49 @@ fn cli_path() -> PathBuf {
 fn predicted_output(action: &str, input: &str) -> String {
     match action {
         "compress" | "lock" => format!("{}.cute", input),
-        "decompress" | "unlock" => {
+        "decompress" => {
             if let Some(stripped) = input.strip_suffix(".cute") {
                 stripped.to_string()
             } else {
                 format!("{}.out", input)
             }
         }
+        "unlock" => {
+            // matches CLI: strip .cute, else append .unlocked
+            if let Some(stripped) = input.strip_suffix(".cute") {
+                stripped.to_string()
+            } else {
+                format!("{}.unlocked", input)
+            }
+        }
         _ => String::new(),
     }
 }
 
-fn run_cli(action: &str, args: &[&str], input: &str, password: Option<&str>) -> CcResult {
+#[derive(Serialize)]
+pub struct OutputCheck {
+    pub predicted: String,
+    pub exists: bool,
+}
+
+/// Returns the predicted output path for an action+input and whether it
+/// already exists. The frontend uses this to gate overwrites before invoking
+/// the CLI, which silently truncates any pre-existing output file.
+#[tauri::command]
+pub fn cc_check_output(action: String, input: String) -> OutputCheck {
+    let predicted = predicted_output(&action, &input);
+    let exists = !predicted.is_empty() && std::path::Path::new(&predicted).exists();
+    OutputCheck { predicted, exists }
+}
+
+/// Returns whether an arbitrary path exists. Used for archive output paths
+/// that the user types or picks freely.
+#[tauri::command]
+pub fn cc_path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
+fn run_cli(action: &str, args: &[&str], input: &str, password: Option<&str>, explicit_output: Option<&str>) -> CcResult {
     let cli = cli_path();
     let mut cmd = Command::new(&cli);
     cmd.args(args);
@@ -115,9 +146,15 @@ fn run_cli(action: &str, args: &[&str], input: &str, password: Option<&str>) -> 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let success = output.status.success();
-    let predicted = predicted_output(action, input);
-    let resolved_output = if success && std::path::Path::new(&predicted).exists() {
-        predicted
+    let resolved_output = if success {
+        let candidate = explicit_output
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| predicted_output(action, input));
+        if !candidate.is_empty() && std::path::Path::new(&candidate).exists() {
+            candidate
+        } else {
+            String::new()
+        }
     } else {
         String::new()
     };
@@ -143,30 +180,67 @@ fn auto_action_for(path: &str) -> &'static str {
 #[tauri::command]
 pub fn cc_auto(path: String) -> CcResult {
     let action = auto_action_for(&path);
-    run_cli(action, &[action, &path], &path, None)
+    run_cli(action, &[action, &path], &path, None, None)
 }
 
 #[tauri::command]
 pub fn cc_compress(path: String) -> CcResult {
-    run_cli("compress", &["compress", &path], &path, None)
+    run_cli("compress", &["compress", &path], &path, None, None)
 }
 
 #[tauri::command]
 pub fn cc_decompress(path: String) -> CcResult {
-    run_cli("decompress", &["decompress", &path], &path, None)
+    run_cli("decompress", &["decompress", &path], &path, None, None)
 }
 
 #[tauri::command]
 pub fn cc_lock(path: String, password: String) -> CcResult {
-    run_cli("lock", &["lock", "-p", &password, &path], &path, None)
+    run_cli("lock", &["lock", "-p", &password, &path], &path, None, None)
 }
 
 #[tauri::command]
 pub fn cc_unlock(path: String, password: String) -> CcResult {
-    run_cli("unlock", &["unlock", "-p", &password, &path], &path, None)
+    run_cli("unlock", &["unlock", "-p", &password, &path], &path, None, None)
 }
 
 #[tauri::command]
 pub fn cc_info(path: String) -> CcResult {
-    run_cli("info", &["info", &path], &path, None)
+    run_cli("info", &["info", &path], &path, None, None)
+}
+
+/// Multi-file archive via depo's ARCV trailer. The CLI doesn't expose
+/// `archive` yet — until it does, this will fail with the CLI's own error
+/// (the GUI surfaces stderr). Lock-mode flags (--fuses / --valid-epochs /
+/// --delay) are passed through; the CLI is expected to reject ones it
+/// doesn't recognize.
+#[tauri::command]
+pub fn cc_archive(
+    paths: Vec<String>,
+    output: String,
+    password: Option<String>,
+    lock_mode: Option<String>,
+    lock_value: Option<u32>,
+) -> CcResult {
+    let mut args: Vec<String> = vec!["archive".to_string()];
+    if let Some(pw) = password.as_ref().filter(|p| !p.is_empty()) {
+        args.push("-p".to_string());
+        args.push(pw.clone());
+    }
+    let lock_flag = match lock_mode.as_deref() {
+        Some("fused") => Some("--fuses"),
+        Some("timed") => Some("--valid-epochs"),
+        Some("delayed") => Some("--delay"),
+        _ => None,
+    };
+    if let (Some(flag), Some(n)) = (lock_flag, lock_value) {
+        args.push(flag.to_string());
+        args.push(n.to_string());
+    }
+    args.extend(paths.iter().cloned());
+    args.push("-o".to_string());
+    args.push(output.clone());
+
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let display_input = paths.first().cloned().unwrap_or_default();
+    run_cli("archive", &args_ref, &display_input, None, Some(&output))
 }
