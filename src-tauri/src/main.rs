@@ -30,6 +30,7 @@ fn main() {
             cc::cc_archive_list,
             cc::cc_archive_extract,
             cc::cc_info_json,
+            cc::cc_fuse_refresh,
             fs::home_dir,
             fs::common_dirs,
             fs::list_dir,

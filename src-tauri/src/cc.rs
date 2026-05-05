@@ -376,6 +376,8 @@ pub fn cc_lock(
     engrave_role: Option<String>,
     public_message: Option<String>,
     purge: Option<bool>,
+    refresh_key: Option<String>,
+    fuse_box: Option<bool>,
 ) -> CcResult {
     let mut args: Vec<&str> = vec!["lock", "-p", &password];
     let lv_str = lock_value.map(|v| v.to_string());
@@ -404,12 +406,29 @@ pub fn cc_lock(
         args.push("--public");
         args.push(m);
     }
-    if purge.unwrap_or(false) {
-        args.push("--purge");
+    if purge.unwrap_or(false)    { args.push("--purge"); }
+    if fuse_box.unwrap_or(false) { args.push("--fuse-box"); }
+    if let Some(k) = refresh_key.as_deref().filter(|s| !s.is_empty()) {
+        args.push("--refresh-key");
+        args.push(k);
     }
     args.push(&path);
 
     run_cli("lock", &args, &path, None, None)
+}
+
+/// Refill fuses on a fused depo file using its delegated refresh key.
+/// Requires the file to have been locked with --fuse-box and --refresh-key.
+#[tauri::command]
+pub fn cc_fuse_refresh(path: String, refresh_key: String, new_fuses: Option<u32>) -> CcResult {
+    let nf = new_fuses.map(|v| v.to_string());
+    let mut args: Vec<&str> = vec!["refresh", "-k", &refresh_key];
+    if let Some(n) = nf.as_deref() {
+        args.push("--fuses");
+        args.push(n);
+    }
+    args.push(&path);
+    run_cli("refresh", &args, &path, None, None)
 }
 
 #[tauri::command]

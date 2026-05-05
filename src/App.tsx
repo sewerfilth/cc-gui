@@ -98,6 +98,7 @@ export default function App() {
   const [archive, setArchive] = useState<ArchiveBrowse | null>(null)
   const [view, setView] = useState<'files' | 'inspector'>('files')
   const [lockPolicyOpen, setLockPolicyOpen] = useState(false)
+  const [refreshFuses, setRefreshFuses] = useState<{ path: string } | null>(null)
 
   const askOverwrite = useCallback((name: string) =>
     new Promise<OverwriteChoice>((resolve) => setOverwritePrompt({ name, resolve })),
@@ -380,6 +381,8 @@ export default function App() {
     engraveRole?: 'root' | 'admin' | 'auditor' | 'reader'
     publicMessage?: string
     purge?: boolean
+    fuseBox?: boolean
+    refreshKey?: string
   }) => {
     if (selectedFiles.length === 0) return
     if (!password) {
@@ -424,6 +427,8 @@ export default function App() {
           engraveRole: params.engraveRole ?? null,
           publicMessage: params.publicMessage ?? null,
           purge: params.purge ?? false,
+          fuseBox: params.fuseBox ?? false,
+          refreshKey: params.refreshKey ?? null,
         })
         setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
         if (res.success && res.output) lastOutput = res.output
@@ -437,6 +442,29 @@ export default function App() {
       setLockPolicyOpen(false)
     }
   }, [selectedFiles, password, cwd, refresh, askOverwrite])
+
+  const runRefreshFuses = useCallback(async (params: {
+    path: string; refreshKey: string; newFuses?: number
+  }) => {
+    setError(null)
+    setBusy(true)
+    setProgress({ i: 1, n: 1, current: basename(params.path) })
+    try {
+      const res = await invoke<CcResult>('cc_fuse_refresh', {
+        path: params.path,
+        refreshKey: params.refreshKey,
+        newFuses: params.newFuses ?? null,
+      })
+      setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
+      if (res.success) await refresh(cwd, params.path)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+      setProgress(null)
+      setRefreshFuses(null)
+    }
+  }, [cwd, refresh])
 
   const runArchive = useCallback(async (params: {
     output: string; password?: string; lockMode: LockMode; lockValue?: number
@@ -815,6 +843,14 @@ export default function App() {
           onCancel={() => setLockPolicyOpen(false)}
         />
       )}
+      {refreshFuses && (
+        <RefreshFusesModal
+          path={refreshFuses.path}
+          busy={busy}
+          onSubmit={runRefreshFuses}
+          onCancel={() => setRefreshFuses(null)}
+        />
+      )}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x} y={contextMenu.y} entry={contextMenu.entry}
@@ -854,6 +890,11 @@ export default function App() {
               case 'decompress': if (fileTargets.length) void runOnSelection('decompress'); break
               case 'lock':       if (fileTargets.length) void runOnSelection('lock'); break
               case 'lock_policy': if (fileTargets.length) setLockPolicyOpen(true); break
+              case 'refresh_fuses':
+                if (contextMenu.entry && !contextMenu.entry.is_dir) {
+                  setRefreshFuses({ path: contextMenu.entry.path })
+                }
+                break
               case 'unlock':     if (fileTargets.length) void runOnSelection('unlock'); break
               case 'auto':       if (fileTargets.length) void runOnSelection('auto'); break
               case 'archive':    if (fileTargets.length >= 2) setArchiveOpen(true); break
@@ -1871,6 +1912,8 @@ function LockPolicyModal({ files, busy, onSubmit, onCancel }: {
     engraveRole?: 'root' | 'admin' | 'auditor' | 'reader'
     publicMessage?: string
     purge?: boolean
+    fuseBox?: boolean
+    refreshKey?: string
   }) => void
   onCancel: () => void
 }) {
@@ -1880,6 +1923,8 @@ function LockPolicyModal({ files, busy, onSubmit, onCancel }: {
   const [role, setRole] = useState<'root' | 'admin' | 'auditor' | 'reader'>('reader')
   const [publicMsg, setPublicMsg] = useState('')
   const [purge, setPurge] = useState(false)
+  const [fuseBox, setFuseBox] = useState(false)
+  const [refreshKey, setRefreshKey] = useState('')
 
   return (
     <ModalShell title="Lock with policy" onClose={onCancel} width={560}>
@@ -1943,6 +1988,26 @@ function LockPolicyModal({ files, busy, onSubmit, onCancel }: {
         </label>
       </Field>
 
+      <Field label="Delegated fuse refresh">
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12.5, cursor: 'pointer', marginBottom: 6 }}>
+          <input type="checkbox" checked={fuseBox} onChange={(e) => setFuseBox(e.target.checked)}
+            disabled={mode !== 'fused'} />
+          <span style={{ color: mode === 'fused' ? 'var(--text)' : 'var(--text-dim)' }}>
+            Enable fuse box (renounce master key — only the fuse vault can decrypt)
+          </span>
+        </label>
+        <input value={refreshKey} onChange={(e) => setRefreshKey(e.target.value)}
+          placeholder="optional refresh key — lets a delegate refill fuses later"
+          disabled={!fuseBox}
+          style={{ ...modalInput, opacity: fuseBox ? 1 : 0.45 }} />
+        {fuseBox && refreshKey && (
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-dim)' }}>
+            Hold this refresh key separately. It can refill the fuse vault on
+            an exhausted file without knowing the master password.
+          </div>
+        )}
+      </Field>
+
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
         <ActionButton label="Cancel" disabled={busy} onClick={onCancel} />
         <ActionButton label="Lock" tone="rose" disabled={busy} onClick={() => onSubmit({
@@ -1952,7 +2017,67 @@ function LockPolicyModal({ files, busy, onSubmit, onCancel }: {
           engraveRole: engrave ? role : undefined,
           publicMessage: publicMsg || undefined,
           purge,
+          fuseBox: mode === 'fused' ? fuseBox : false,
+          refreshKey: (mode === 'fused' && fuseBox) ? (refreshKey || undefined) : undefined,
         })} />
+      </div>
+    </ModalShell>
+  )
+}
+
+function RefreshFusesModal({ path, busy, onSubmit, onCancel }: {
+  path: string
+  busy: boolean
+  onSubmit: (p: { path: string; refreshKey: string; newFuses?: number }) => void
+  onCancel: () => void
+}) {
+  const [key, setKey] = useState('')
+  const [overrideCount, setOverrideCount] = useState(false)
+  const [val, setVal] = useState<number>(3)
+  const submit = () => {
+    if (!key) return
+    onSubmit({ path, refreshKey: key, newFuses: overrideCount ? Math.max(1, val) : undefined })
+  }
+  return (
+    <ModalShell title="Refresh fuses" onClose={onCancel} width={520}>
+      <div style={{ fontSize: 12.5, lineHeight: 1.6, marginBottom: 14 }}>
+        Refill the fuse vault on a fused .cute file using its delegated
+        refresh key. Requires the file to have been locked with
+        <span className="mono" style={{ marginLeft: 4 }}>--fuse-box --refresh-key</span>.
+      </div>
+      <div style={{
+        marginBottom: 14, padding: '6px 10px', borderRadius: 6,
+        background: 'var(--bg)', border: '1px solid var(--border)',
+        fontSize: 11.5,
+      }}>
+        <span style={{ color: 'var(--text-dim)' }}>Target: </span>
+        <span className="mono" style={{ color: 'var(--accent)', wordBreak: 'break-all' }}>
+          {path}
+        </span>
+      </div>
+
+      <Field label="Refresh key">
+        <input type="password" value={key} onChange={(e) => setKey(e.target.value)}
+          placeholder="the delegated refresh key set at lock time"
+          autoFocus
+          style={modalInput} />
+      </Field>
+
+      <Field label="New fuse count">
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12.5, cursor: 'pointer', marginBottom: 6 }}>
+          <input type="checkbox" checked={overrideCount} onChange={(e) => setOverrideCount(e.target.checked)} />
+          <span>Override — set a specific count (default: restore original max_fuses)</span>
+        </label>
+        {overrideCount && (
+          <input type="number" min={1} value={val}
+            onChange={(e) => setVal(parseInt(e.target.value || '1', 10))}
+            style={{ ...modalInput, width: 130 }} />
+        )}
+      </Field>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+        <ActionButton label="Cancel" disabled={busy} onClick={onCancel} />
+        <ActionButton label="Refresh" tone="blue" disabled={busy || !key} onClick={submit} />
       </div>
     </ModalShell>
   )
@@ -2030,6 +2155,7 @@ function ContextMenu({ x, y, entry, selection, listing, archiveMode, hasPassword
     { type: 'item', id: 'lock', label: 'Lock with password', disabled: fileCount === 0 || !hasPassword, hint: hasPassword ? undefined : 'set password in action bar' },
     { type: 'item', id: 'lock_policy', label: 'Lock with policy…', disabled: fileCount === 0 || !hasPassword, hint: hasPassword ? 'fuses · timed · roles' : 'set password in action bar' },
     { type: 'item', id: 'unlock', label: 'Unlock with password', disabled: fileCount === 0 || !hasPassword, hint: hasPassword ? undefined : 'set password in action bar' },
+    { type: 'item', id: 'refresh_fuses', label: 'Refresh fuses…', disabled: !single || entry.is_dir, hint: single ? 'requires fuse-box + refresh key' : 'select one file' },
     { type: 'item', id: 'archive', label: `Archive ${fileCount} files…`, disabled: fileCount < 2 },
     { type: 'sep' },
     { type: 'item', id: 'trash', label: `Move to Trash${total > 1 ? ` (${total})` : ''}`, danger: true },
