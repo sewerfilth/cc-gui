@@ -96,6 +96,7 @@ export default function App() {
   const [confirmDelete, setConfirmDelete] = useState<{ mode: 'trash' | 'permanent'; files: FsEntry[] } | null>(null)
   const [inspect, setInspect] = useState<{ path: string; loading: boolean; result: CcResult | null } | null>(null)
   const [archive, setArchive] = useState<ArchiveBrowse | null>(null)
+  const [view, setView] = useState<'files' | 'inspector'>('files')
 
   const askOverwrite = useCallback((name: string) =>
     new Promise<OverwriteChoice>((resolve) => setOverwritePrompt({ name, resolve })),
@@ -648,19 +649,29 @@ export default function App() {
         />
 
         <main style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-          <FileList
-            listing={sortedListing}
-            selection={selection}
-            sort={sort}
-            onSort={cycleSort}
-            onClick={onItemClick}
-            onOpen={onItemOpen}
-            onContextMenu={(entry, ev) => {
-              setSelection((prev) => prev.has(entry.path) ? prev : new Set([entry.path]))
-              setAnchor(entry.path)
-              setContextMenu({ x: ev.clientX, y: ev.clientY, entry })
-            }}
-          />
+          <TabBar view={view} onChange={setView} />
+
+          {view === 'files' ? (
+            <FileList
+              listing={sortedListing}
+              selection={selection}
+              sort={sort}
+              onSort={cycleSort}
+              onClick={onItemClick}
+              onOpen={onItemOpen}
+              onContextMenu={(entry, ev) => {
+                setSelection((prev) => prev.has(entry.path) ? prev : new Set([entry.path]))
+                setAnchor(entry.path)
+                setContextMenu({ x: ev.clientX, y: ev.clientY, entry })
+              }}
+            />
+          ) : (
+            <InspectorView
+              entry={selectedFiles[0] ?? null}
+              archive={archive}
+              cwd={cwd}
+            />
+          )}
 
           <StatusBar listing={sortedListing} selectedFiles={selectedFiles} />
 
@@ -1202,6 +1213,162 @@ function StatusBar({ listing, selectedFiles }: { listing: Listing | null; select
           <span style={{ color: 'var(--accent-blue)' }}>{selectedFiles.length}</span> selected · {formatSize(selBytes)}
         </span>
       </>}
+    </div>
+  )
+}
+
+/* ── tabs + inspector ────────────────────────────────────────────────── */
+
+function TabBar({ view, onChange }: {
+  view: 'files' | 'inspector'; onChange: (v: 'files' | 'inspector') => void
+}) {
+  const tab = (key: 'files' | 'inspector', label: string): React.CSSProperties => ({
+    padding: '6px 14px', fontSize: 12, fontWeight: 500,
+    borderRadius: 6, cursor: 'pointer',
+    background: view === key ? 'var(--surface-2)' : 'transparent',
+    color: view === key ? 'var(--text)' : 'var(--text-dim)',
+    border: 'none', userSelect: 'none',
+  })
+  return (
+    <div style={{
+      display: 'flex', gap: 2, padding: '6px 8px',
+      borderBottom: '1px solid var(--border)',
+      background: 'var(--surface)', flex: '0 0 auto',
+    }}>
+      <button style={tab('files', 'Files')} onClick={() => onChange('files')}>Files</button>
+      <button style={tab('inspector', 'Inspector')} onClick={() => onChange('inspector')}>Inspector</button>
+    </div>
+  )
+}
+
+function InspectorView({ entry, archive, cwd }: {
+  entry: FsEntry | null
+  archive: ArchiveBrowse | null
+  cwd: string
+}) {
+  const [info, setInfo] = useState<{ loading: boolean; result: CcResult | null }>({ loading: false, result: null })
+
+  // Fetch cc_info for filesystem entries that look like containers/archives.
+  // Skip for archive entries (their `path` is virtual and would fail).
+  const target = !archive && entry && !entry.is_dir &&
+    (entry.ext === 'cute' || entry.ext === 'press' || ARCHIVE_EXTS.has(entry.ext))
+      ? entry.path
+      : null
+
+  useEffect(() => {
+    if (!target) { setInfo({ loading: false, result: null }); return }
+    setInfo({ loading: true, result: null })
+    invoke<CcResult>('cc_info', { path: target })
+      .then((r) => setInfo({ loading: false, result: r }))
+      .catch((e) => setInfo({
+        loading: false,
+        result: { action: 'info', input: target, output: '', stdout: '', stderr: String(e), success: false },
+      }))
+  }, [target])
+
+  // What are we inspecting? Three modes:
+  //   1. Archive root (in archive mode, no entry selected)
+  //   2. Archive entry (in archive mode, entry selected)
+  //   3. Filesystem entry / cwd
+  const mode: 'archive' | 'archive_entry' | 'fs' =
+    archive && !entry ? 'archive'
+    : archive ? 'archive_entry'
+    : 'fs'
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: 18, minHeight: 0 }}>
+      {mode === 'archive' && archive && (
+        <>
+          <Section title="Archive">
+            <Field2 label="Path">{archive.path}</Field2>
+            <Field2 label="Format">{archive.format}</Field2>
+            <Field2 label="Entries">{archive.entries.length}</Field2>
+            <Field2 label="Total uncompressed">
+              {formatSize(archive.entries.reduce((a, e) => a + (e.is_dir ? 0 : e.size), 0))}
+            </Field2>
+            <Field2 label="Total compressed">
+              {formatSize(archive.entries.reduce((a, e) => a + (e.is_dir ? 0 : e.compressed_size), 0))}
+            </Field2>
+            <Field2 label="Encrypted entries">
+              {archive.entries.filter((e) => e.is_encrypted).length}
+            </Field2>
+          </Section>
+        </>
+      )}
+
+      {mode === 'archive_entry' && entry && archive && (
+        <Section title={`Entry — ${entry.name}`}>
+          <Field2 label="Path inside archive">{entry.path}</Field2>
+          <Field2 label="Type">{entry.is_dir ? 'directory' : 'file'}</Field2>
+          {!entry.is_dir && <>
+            <Field2 label="Size">{formatSize(entry.size)}</Field2>
+            <Field2 label="Modified">{formatDate(entry.modified)}</Field2>
+          </>}
+          <Field2 label="Source archive">{archive.path}</Field2>
+          <Field2 label="Archive format">{archive.format}</Field2>
+        </Section>
+      )}
+
+      {mode === 'fs' && !entry && (
+        <div style={{ color: 'var(--text-dim)', fontSize: 12.5 }}>
+          Select a file to inspect.
+          <div style={{ marginTop: 6, fontSize: 11.5 }}>Current folder: <span className="mono">{cwd}</span></div>
+        </div>
+      )}
+
+      {mode === 'fs' && entry && (
+        <>
+          <Section title={entry.name}>
+            <Field2 label="Path">{entry.path}</Field2>
+            <Field2 label="Type">{entry.is_dir ? 'directory' : 'file'}</Field2>
+            {!entry.is_dir && <>
+              <Field2 label="Size">{formatSize(entry.size)}</Field2>
+              <Field2 label="Extension">{entry.ext || '(none)'}</Field2>
+            </>}
+            <Field2 label="Modified">{formatDate(entry.modified)}</Field2>
+          </Section>
+
+          {target && (
+            <Section title="Container / archive header">
+              {info.loading && <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>Loading…</div>}
+              {info.result && (
+                <pre className="mono" style={{
+                  margin: 0, padding: '10px 12px', borderRadius: 6,
+                  background: 'var(--bg)',
+                  color: info.result.success ? 'var(--text)' : 'var(--err)',
+                  fontSize: 11.5, lineHeight: 1.55,
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                  maxHeight: 360, overflow: 'auto',
+                }}>{info.result.success
+                  ? (info.result.stdout || '(no output)')
+                  : (info.result.stderr || 'failed')
+                }</pre>
+              )}
+            </Section>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{
+        fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase',
+        letterSpacing: '0.08em', marginBottom: 8,
+      }}>{title}</div>
+      {children}
+    </div>
+  )
+}
+
+function Field2({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: 'flex', gap: 14, marginBottom: 6, fontSize: 12.5, lineHeight: 1.5 }}>
+      <div style={{ width: 140, color: 'var(--text-dim)', flexShrink: 0 }}>{label}</div>
+      <div className="mono" style={{ color: 'var(--text)', wordBreak: 'break-all' }}>{children}</div>
     </div>
   )
 }
