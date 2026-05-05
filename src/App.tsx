@@ -477,8 +477,11 @@ function FileList({ listing, selection, sort, onSort, onClick, onOpen }: {
   const arrow = (k: SortKey) => sort.key === k ? (sort.dir === 'asc' ? ' ↑' : ' ↓') : ''
 
   return (
-    <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12.5 }}>
+    <div style={{ flex: 1, overflow: 'auto', minHeight: 0, minWidth: 0 }}>
+      <table style={{
+        width: '100%', borderCollapse: 'collapse', fontSize: 12.5,
+        tableLayout: 'fixed',
+      }}>
         <thead style={{
           position: 'sticky', top: 0, background: 'var(--bg)',
           color: 'var(--text-dim)', fontSize: 10.5,
