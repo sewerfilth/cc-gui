@@ -97,6 +97,7 @@ export default function App() {
   const [inspect, setInspect] = useState<{ path: string; loading: boolean; result: CcResult | null } | null>(null)
   const [archive, setArchive] = useState<ArchiveBrowse | null>(null)
   const [view, setView] = useState<'files' | 'inspector'>('files')
+  const [lockPolicyOpen, setLockPolicyOpen] = useState(false)
 
   const askOverwrite = useCallback((name: string) =>
     new Promise<OverwriteChoice>((resolve) => setOverwritePrompt({ name, resolve })),
@@ -371,6 +372,71 @@ export default function App() {
       setProgress(null)
     }
   }, [selectedFiles, password, cwd, refresh, askOverwrite, compressLevel])
+
+  const runLockWithPolicy = useCallback(async (params: {
+    lockMode: LockMode
+    lockValue?: number
+    engraveText?: string
+    engraveRole?: 'root' | 'admin' | 'auditor' | 'reader'
+    publicMessage?: string
+    purge?: boolean
+  }) => {
+    if (selectedFiles.length === 0) return
+    if (!password) {
+      setError('Password required for lock.')
+      return
+    }
+    setError(null)
+    setBusy(true)
+    let lastOutput: string | undefined
+    let sticky: StickyChoice = null
+    try {
+      for (let i = 0; i < selectedFiles.length; i++) {
+        const f = selectedFiles[i]
+        setProgress({ i: i + 1, n: selectedFiles.length, current: f.name })
+        const check = await invoke<OutputCheck>('cc_check_output', { action: 'lock', input: f.path })
+        let proceed = true
+        if (check.exists) {
+          if (sticky === 'replace_all') proceed = true
+          else if (sticky === 'skip_all') proceed = false
+          else {
+            const choice = await askOverwrite(basename(check.predicted))
+            if (choice === 'cancel') break
+            if (choice === 'skip') proceed = false
+            else if (choice === 'replace') proceed = true
+            else if (choice === 'replace_all') { sticky = 'replace_all'; proceed = true }
+            else if (choice === 'skip_all')    { sticky = 'skip_all'; proceed = false }
+          }
+        }
+        if (!proceed) {
+          setHistory((h) => [{
+            id: ++entryId, action: 'lock', input: f.path, output: '',
+            stdout: '', stderr: `skipped: would overwrite ${basename(check.predicted)}`, success: false,
+          }, ...h].slice(0, 50))
+          continue
+        }
+        const res = await invoke<CcResult>('cc_lock', {
+          path: f.path,
+          password,
+          lockMode: params.lockMode === 'none' ? null : params.lockMode,
+          lockValue: params.lockMode === 'none' ? null : (params.lockValue ?? null),
+          engraveText: params.engraveText ?? null,
+          engraveRole: params.engraveRole ?? null,
+          publicMessage: params.publicMessage ?? null,
+          purge: params.purge ?? false,
+        })
+        setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
+        if (res.success && res.output) lastOutput = res.output
+      }
+      await refresh(cwd, lastOutput)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+      setProgress(null)
+      setLockPolicyOpen(false)
+    }
+  }, [selectedFiles, password, cwd, refresh, askOverwrite])
 
   const runArchive = useCallback(async (params: {
     output: string; password?: string; lockMode: LockMode; lockValue?: number
@@ -713,6 +779,14 @@ export default function App() {
           onCancel={() => setArchiveOpen(false)}
         />
       )}
+      {lockPolicyOpen && (
+        <LockPolicyModal
+          files={selectedFiles}
+          busy={busy}
+          onSubmit={runLockWithPolicy}
+          onCancel={() => setLockPolicyOpen(false)}
+        />
+      )}
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x} y={contextMenu.y} entry={contextMenu.entry}
@@ -751,6 +825,7 @@ export default function App() {
               case 'compress':   if (fileTargets.length) void runOnSelection('compress'); break
               case 'decompress': if (fileTargets.length) void runOnSelection('decompress'); break
               case 'lock':       if (fileTargets.length) void runOnSelection('lock'); break
+              case 'lock_policy': if (fileTargets.length) setLockPolicyOpen(true); break
               case 'unlock':     if (fileTargets.length) void runOnSelection('unlock'); break
               case 'auto':       if (fileTargets.length) void runOnSelection('auto'); break
               case 'archive':    if (fileTargets.length >= 2) setArchiveOpen(true); break
@@ -1583,6 +1658,103 @@ function ArchiveModal({ files, defaultOutput, busy, onSubmit, onCancel }: {
   )
 }
 
+function LockPolicyModal({ files, busy, onSubmit, onCancel }: {
+  files: FsEntry[]
+  busy: boolean
+  onSubmit: (p: {
+    lockMode: LockMode
+    lockValue?: number
+    engraveText?: string
+    engraveRole?: 'root' | 'admin' | 'auditor' | 'reader'
+    publicMessage?: string
+    purge?: boolean
+  }) => void
+  onCancel: () => void
+}) {
+  const [mode, setMode] = useState<LockMode>('none')
+  const [val, setVal] = useState<number>(3)
+  const [engrave, setEngrave] = useState('')
+  const [role, setRole] = useState<'root' | 'admin' | 'auditor' | 'reader'>('reader')
+  const [publicMsg, setPublicMsg] = useState('')
+  const [purge, setPurge] = useState(false)
+
+  return (
+    <ModalShell title="Lock with policy" onClose={onCancel} width={560}>
+      <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 10 }}>
+        Apply a depo lock policy to {files.length} {files.length === 1 ? 'file' : 'files'}.
+        Uses the password you've already set in the action bar.
+      </div>
+
+      <Field label="Lock mode">
+        <div style={{ display: 'flex', gap: 8 }}>
+          <select value={mode} onChange={(e) => setMode(e.target.value as LockMode)}
+            style={{ ...modalInput, flex: 1 }}>
+            <option value="none">none — plain password lock</option>
+            <option value="fused">fused — limit max decryptions</option>
+            <option value="timed">timed — valid for N epochs</option>
+            <option value="delayed">delayed — accessible after N epochs</option>
+          </select>
+          {mode !== 'none' && (
+            <input type="number" min={1} value={val}
+              onChange={(e) => setVal(parseInt(e.target.value || '1', 10))}
+              style={{ ...modalInput, width: 110 }} />
+          )}
+        </div>
+        {mode !== 'none' && (
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-dim)' }}>
+            {mode === 'fused' && 'After N decryptions the file becomes permanently locked.'}
+            {mode === 'timed' && 'Default epoch length is 1 hour (3600s); change at lock time only.'}
+            {mode === 'delayed' && 'Decryption fails until N epochs have elapsed since lock.'}
+          </div>
+        )}
+      </Field>
+
+      <Field label="Engraving (role-gated)">
+        <input value={engrave} onChange={(e) => setEngrave(e.target.value)}
+          placeholder="optional message stored encrypted, only readable by role ↓"
+          style={modalInput} />
+        {engrave && (
+          <div style={{ display: 'flex', gap: 8, marginTop: 6, alignItems: 'center' }}>
+            <span style={{ fontSize: 10.5, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>readable by</span>
+            <select value={role} onChange={(e) => setRole(e.target.value as 'root' | 'admin' | 'auditor' | 'reader')}
+              style={{ ...modalInput, flex: 1 }}>
+              <option value="root">root (level 0) — only the master key</option>
+              <option value="admin">admin (level 1)</option>
+              <option value="auditor">auditor (level 2)</option>
+              <option value="reader">reader (level 3) — anyone who can decrypt</option>
+            </select>
+          </div>
+        )}
+      </Field>
+
+      <Field label="Public message">
+        <input value={publicMsg} onChange={(e) => setPublicMsg(e.target.value)}
+          placeholder="optional cleartext, visible without unlocking"
+          style={modalInput} />
+      </Field>
+
+      <Field label="Self-purge">
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12.5, cursor: 'pointer' }}>
+          <input type="checkbox" checked={purge} onChange={(e) => setPurge(e.target.checked)} />
+          <span>Securely delete the .cute file after fuses exhaust or timed window expires</span>
+        </label>
+      </Field>
+
+      <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
+        <ActionButton label="Cancel" disabled={busy} onClick={onCancel} />
+        <ActionButton label="Lock" tone="rose" disabled={busy} onClick={() => onSubmit({
+          lockMode: mode,
+          lockValue: mode === 'none' ? undefined : Math.max(1, Math.floor(val || 1)),
+          engraveText: engrave || undefined,
+          engraveRole: engrave ? role : undefined,
+          publicMessage: publicMsg || undefined,
+          purge,
+        })} />
+      </div>
+    </ModalShell>
+  )
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 10 }}>
@@ -1653,6 +1825,7 @@ function ContextMenu({ x, y, entry, selection, listing, archiveMode, hasPassword
     { type: 'item', id: 'decompress', label: isCute ? 'Decompress' : `Decompress${total > 1 ? ` (${fileCount})` : ''}`, disabled: fileCount === 0 },
     { type: 'sep' },
     { type: 'item', id: 'lock', label: 'Lock with password', disabled: fileCount === 0 || !hasPassword, hint: hasPassword ? undefined : 'set password in action bar' },
+    { type: 'item', id: 'lock_policy', label: 'Lock with policy…', disabled: fileCount === 0 || !hasPassword, hint: hasPassword ? 'fuses · timed · roles' : 'set password in action bar' },
     { type: 'item', id: 'unlock', label: 'Unlock with password', disabled: fileCount === 0 || !hasPassword, hint: hasPassword ? undefined : 'set password in action bar' },
     { type: 'item', id: 'archive', label: `Archive ${fileCount} files…`, disabled: fileCount < 2 },
     { type: 'sep' },

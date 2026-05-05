@@ -367,8 +367,49 @@ pub fn cc_decompress(path: String) -> CcResult {
 }
 
 #[tauri::command]
-pub fn cc_lock(path: String, password: String) -> CcResult {
-    run_cli("lock", &["lock", "-p", &password, &path], &path, None, None)
+pub fn cc_lock(
+    path: String,
+    password: String,
+    lock_mode: Option<String>,
+    lock_value: Option<u32>,
+    engrave_text: Option<String>,
+    engrave_role: Option<String>,
+    public_message: Option<String>,
+    purge: Option<bool>,
+) -> CcResult {
+    let mut args: Vec<&str> = vec!["lock", "-p", &password];
+    let lv_str = lock_value.map(|v| v.to_string());
+
+    if let Some(mode) = lock_mode.as_deref() {
+        let flag = match mode {
+            "fused"   => Some("--fuses"),
+            "timed"   => Some("--timed"),
+            "delayed" => Some("--delay"),
+            _ => None,
+        };
+        if let (Some(f), Some(v)) = (flag, lv_str.as_deref()) {
+            args.push(f);
+            args.push(v);
+        }
+    }
+    if let Some(t) = engrave_text.as_deref().filter(|s| !s.is_empty()) {
+        args.push("--engrave");
+        args.push(t);
+        if let Some(r) = engrave_role.as_deref().filter(|s| !s.is_empty()) {
+            args.push("--engrave-role");
+            args.push(r);
+        }
+    }
+    if let Some(m) = public_message.as_deref().filter(|s| !s.is_empty()) {
+        args.push("--public");
+        args.push(m);
+    }
+    if purge.unwrap_or(false) {
+        args.push("--purge");
+    }
+    args.push(&path);
+
+    run_cli("lock", &args, &path, None, None)
 }
 
 #[tauri::command]
