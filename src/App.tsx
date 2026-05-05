@@ -707,10 +707,28 @@ export default function App() {
           x={contextMenu.x} y={contextMenu.y} entry={contextMenu.entry}
           selection={Array.from(selection)}
           listing={listing}
+          archiveMode={!!archive}
           hasPassword={!!password}
           onClose={() => setContextMenu(null)}
           onAction={(id) => {
             setContextMenu(null)
+            if (archive) {
+              const archTargets = Array.from(selection)
+                .map((p) => sortedListing?.entries.find((e) => e.path === p))
+                .filter((e): e is FsEntry => !!e && !e.is_dir)
+              switch (id) {
+                case 'extract':
+                  void runExtract(archTargets.length > 0 ? archTargets : undefined)
+                  break
+                case 'reveal_archive':
+                  void invoke('cc_reveal', { path: archive.path })
+                  break
+                case 'exit_archive':
+                  goUp()
+                  break
+              }
+              return
+            }
             const targets = Array.from(selection)
               .map((p) => listing?.entries.find((e) => e.path === p))
               .filter((e): e is FsEntry => !!e)
@@ -756,7 +774,8 @@ function archiveDefaultOutput(files: FsEntry[], cwd: string): string {
   const dir = files[0]
     ? files[0].path.slice(0, files[0].path.lastIndexOf('/'))
     : cwd
-  return `${dir}/archive.cute`
+  // ZIP is the only writer libcutecontainer currently supports.
+  return `${dir}/archive.zip`
 }
 
 function PathBar({ path, canUp, showHidden, filter, archiveFormat, onChange, onSubmit, onUp, onToggleHidden, onFilter }: {
@@ -1351,9 +1370,10 @@ type CtxItem =
   | { type: 'item'; id: string; label: string; hint?: string; disabled?: boolean; danger?: boolean }
   | { type: 'sep' }
 
-function ContextMenu({ x, y, entry, selection, listing, hasPassword, onClose, onAction }: {
+function ContextMenu({ x, y, entry, selection, listing, archiveMode, hasPassword, onClose, onAction }: {
   x: number; y: number; entry: FsEntry; selection: string[]
   listing: Listing | null
+  archiveMode: boolean
   hasPassword: boolean
   onClose: () => void
   onAction: (id: string) => void
@@ -1378,7 +1398,14 @@ function ContextMenu({ x, y, entry, selection, listing, hasPassword, onClose, on
   const single = total === 1
   const isCute = single && entry.ext === 'cute'
 
-  const items: CtxItem[] = [
+  const items: CtxItem[] = archiveMode ? [
+    { type: 'item', id: 'extract',
+      label: total > 1 ? `Extract ${total} entries…` : 'Extract this entry…',
+      disabled: entry.is_dir && total === 1 },
+    { type: 'sep' },
+    { type: 'item', id: 'reveal_archive', label: 'Reveal source archive in Finder' },
+    { type: 'item', id: 'exit_archive',   label: 'Exit archive' },
+  ] : [
     { type: 'item', id: 'open', label: entry.is_dir ? 'Open Folder' : 'Open with default app' },
     { type: 'item', id: 'reveal', label: 'Reveal in Finder' },
     ...(single && !entry.is_dir ? [{ type: 'item' as const, id: 'inspect', label: 'Inspect…', hint: 'show .cute info' }] : []),
