@@ -1,0 +1,46 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+  color-scheme: dark;
+  --bg: #1a1a1e;
+  --surface: #25252b;
+  --surface-2: #2d2d35;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #f0f0f3;
+  --text-dim: rgba(240, 240, 243, 0.55);
+  --accent: #fb6f92;
+  --accent-blue: #38bdf8;
+  --ok: #34d399;
+  --err: #f87171;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+input {
+  font: inherit;
+}
+
+code, .mono {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 0.85em;
+}
