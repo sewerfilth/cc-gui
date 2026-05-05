@@ -44,3 +44,10 @@ code, .mono {
   font-family: 'SF Mono', 'Menlo', monospace;
   font-size: 0.85em;
 }
+
+/* Titlebar drag region (macOS Overlay style).
+   Children that should remain interactive must opt-out via .no-drag. */
+.titlebar { -webkit-app-region: drag; user-select: none; }
+.titlebar .no-drag,
+.titlebar input,
+.titlebar button { -webkit-app-region: no-drag; }

@@ -3,6 +3,8 @@
 mod cc;
 mod fs;
 
+use tauri::menu::Menu;
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -17,6 +19,14 @@ fn main() {
             fs::common_dirs,
             fs::list_dir,
         ])
+        .setup(|app| {
+            // macOS uses the global menu bar — without this Cmd-Q, services,
+            // copy/paste, etc. are absent. Tauri's default menu fills the
+            // standard items (App / Edit / View / Window / Help).
+            let menu = Menu::default(app.handle())?;
+            app.set_menu(menu)?;
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running cc-gui");
 }

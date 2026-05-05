@@ -294,6 +294,8 @@ export default function App() {
             onOpen={onItemOpen}
           />
 
+          <StatusBar listing={sortedListing} selectedFiles={selectedFiles} />
+
           {error && (
             <div style={{
               background: 'rgba(248,113,113,0.08)', color: 'var(--err)',
@@ -322,11 +324,19 @@ function PathBar({ path, canUp, showHidden, onChange, onSubmit, onUp, onToggleHi
   onChange: (s: string) => void; onSubmit: () => void; onUp: () => void; onToggleHidden: () => void
 }) {
   return (
-    <div style={{
+    <div className="titlebar" style={{
       display: 'flex', alignItems: 'center', gap: 8,
-      padding: '8px 12px', background: 'var(--surface)',
+      padding: '8px 12px 8px 84px', background: 'var(--surface)',
       borderBottom: '1px solid var(--border)', flex: '0 0 auto',
+      height: 44,
     }}>
+      <div className="no-drag" style={{
+        display: 'flex', alignItems: 'center', gap: 6,
+        color: 'var(--accent)', fontWeight: 600, fontSize: 13,
+        letterSpacing: '0.02em', marginRight: 6, userSelect: 'none',
+      }}>
+        <span style={{ fontSize: 14 }}>◆</span>cc-gui
+      </div>
       <button onClick={onUp} disabled={!canUp} title="Parent (⌘↑)" style={iconBtn}>↑</button>
       <input
         value={path}
@@ -461,7 +471,7 @@ function FileList({ listing, selection, sort, onSort, onClick, onOpen }: {
     return <div style={{ flex: 1, color: 'var(--text-dim)', padding: 24, fontSize: 13 }}>Loading…</div>
   }
   if (listing.entries.length === 0) {
-    return <div style={{ flex: 1, color: 'var(--text-dim)', padding: 24, fontSize: 13 }}>Empty folder.</div>
+    return <DropHint label="Empty folder" hint="Drop files here to compress, lock, or unlock — or browse with the sidebar." />
   }
 
   const arrow = (k: SortKey) => sort.key === k ? (sort.dir === 'asc' ? ' ↑' : ' ↓') : ''
@@ -604,6 +614,67 @@ function ActionButton({ label, hint, disabled, onClick, tone = 'neutral' }: {
       }}>
       {label}
     </button>
+  )
+}
+
+function DropHint({ label, hint }: { label: string; hint: string }) {
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      padding: 24, gap: 10, color: 'var(--text-dim)',
+    }}>
+      <div style={{
+        width: 64, height: 64, borderRadius: 14,
+        border: '2px dashed var(--border)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 28, color: 'var(--accent)',
+      }}>◆</div>
+      <div style={{ fontSize: 13, color: 'var(--text)' }}>{label}</div>
+      <div style={{ fontSize: 11.5, maxWidth: 320, textAlign: 'center', lineHeight: 1.5 }}>
+        {hint}
+      </div>
+    </div>
+  )
+}
+
+function StatusBar({ listing, selectedFiles }: { listing: Listing | null; selectedFiles: FsEntry[] }) {
+  const stats = useMemo(() => {
+    if (!listing) return null
+    let dirs = 0, files = 0, cute = 0, bytes = 0
+    for (const e of listing.entries) {
+      if (e.is_dir) dirs++
+      else { files++; bytes += e.size; if (e.ext === 'cute') cute++ }
+    }
+    return { dirs, files, cute, bytes }
+  }, [listing])
+
+  if (!stats) return null
+  const selBytes = selectedFiles.reduce((acc, f) => acc + f.size, 0)
+  return (
+    <div style={{
+      flex: '0 0 auto', padding: '4px 14px',
+      borderTop: '1px solid var(--border)',
+      background: 'var(--bg)',
+      color: 'var(--text-dim)', fontSize: 11,
+      display: 'flex', gap: 14, alignItems: 'center',
+      fontFamily: "'SF Mono', monospace", letterSpacing: '0.02em',
+    }}>
+      <span>{stats.dirs} dir{stats.dirs === 1 ? '' : 's'}</span>
+      <span>·</span>
+      <span>{stats.files} file{stats.files === 1 ? '' : 's'}</span>
+      {stats.cute > 0 && <>
+        <span>·</span>
+        <span style={{ color: 'var(--accent)' }}>{stats.cute} .cute</span>
+      </>}
+      <span>·</span>
+      <span>{formatSize(stats.bytes)}</span>
+      {selectedFiles.length > 0 && <>
+        <span style={{ marginLeft: 'auto' }}>
+          <span style={{ color: 'var(--accent-blue)' }}>{selectedFiles.length}</span> selected · {formatSize(selBytes)}
+        </span>
+      </>}
+    </div>
   )
 }
 
