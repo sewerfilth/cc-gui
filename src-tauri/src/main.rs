@@ -135,6 +135,18 @@ fn main() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running cc-gui");
+        .build(tauri::generate_context!())
+        .expect("error while building cc-gui")
+        .run(|handle, event| {
+            // macOS sends an "openURLs:" Apple Event when the user opens a
+            // file with the .app from Finder (or via `open file.cute`).
+            // Forward each path to the frontend so it can navigate / inspect.
+            if let tauri::RunEvent::Opened { urls } = event {
+                for url in urls {
+                    if let Ok(p) = url.to_file_path() {
+                        let _ = handle.emit("file-open", p.to_string_lossy().to_string());
+                    }
+                }
+            }
+        });
 }

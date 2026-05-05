@@ -630,6 +630,34 @@ export default function App() {
     return () => window.removeEventListener('keydown', handler)
   }, [goUp, sortedListing, selection, onItemOpen, busy])
 
+  // OS file-open events — when cc-gui is launched (or already running)
+  // with a file argument from Finder, the runtime emits "file-open" per
+  // path. Navigate to the parent dir and select the file; if it's an
+  // archive, enter archive-browse mode.
+  useEffect(() => {
+    const unlisten = listen<string>('file-open', async (evt) => {
+      const path = evt.payload
+      if (!path) return
+      const slash = path.lastIndexOf('/')
+      const dir = slash >= 0 ? path.slice(0, slash) : path
+      // Probe extension for archive entry — fall through to plain navigate.
+      const dot = path.lastIndexOf('.')
+      const ext = dot >= 0 ? path.slice(dot + 1).toLowerCase() : ''
+      if (ARCHIVE_EXTS.has(ext)) {
+        try {
+          const listing = await invoke<ArchiveListing>('cc_archive_list', { path })
+          setArchive({ path, format: listing.format, entries: listing.entries, curDir: '' })
+          setSelection(new Set())
+          setAnchor(null)
+          return
+        } catch (_e) { /* fall through to fs navigate */ }
+      }
+      await refresh(dir, path)
+      setView('inspector') /* show metadata immediately */
+    })
+    return () => { void unlisten.then((f) => f()) }
+  }, [refresh])
+
   // Native menu events from the Tauri menu bar. Each item emits its id;
   // we dispatch to the same handlers the in-app buttons / shortcuts use.
   useEffect(() => {
@@ -1408,6 +1436,8 @@ function InspectorView({ entry, archive, cwd }: {
 
       {mode === 'fs' && entry && (
         <>
+          <SummaryHero entry={entry} info={info.data} />
+
           <Section title={entry.name}>
             <Field2 label="Path">{entry.path}</Field2>
             <Field2 label="Type">{entry.is_dir ? 'directory' : 'file'}</Field2>
@@ -1474,13 +1504,15 @@ function InspectorView({ entry, archive, cwd }: {
           )}
 
           {target && info.data?.module && (
-            <Section title={`module: ${info.data.module.name}`}>
-              <Field2 label="Module type">{info.data.module.type}</Field2>
-              <Field2 label="Capabilities">0x{info.data.module.caps.toString(16).padStart(4, '0')}</Field2>
-              {info.data.module.fields && Object.entries(info.data.module.fields).map(([k, v]) => (
-                <Field2 key={k} label={k}>{v}</Field2>
-              ))}
-            </Section>
+            info.data.module.name === 'depo'
+              ? <DepoModuleSection mod={info.data.module} />
+              : <Section title={`module: ${info.data.module.name}`}>
+                  <Field2 label="Module type">{info.data.module.type}</Field2>
+                  <Field2 label="Capabilities">0x{info.data.module.caps.toString(16).padStart(4, '0')}</Field2>
+                  {info.data.module.fields && Object.entries(info.data.module.fields).map(([k, v]) => (
+                    <Field2 key={k} label={k}>{v}</Field2>
+                  ))}
+                </Section>
           )}
 
           {target && info.data && !info.data.container && !info.data.module && (
@@ -1495,6 +1527,177 @@ function InspectorView({ entry, archive, cwd }: {
         </>
       )}
     </div>
+  )
+}
+
+function SummaryHero({ entry, info }: { entry: FsEntry; info: InfoJson | null }) {
+  // Build a one-line "what is this" summary so the Inspector tells a
+  // story before dumping fields. Takes precedence in this order:
+  // depo (encrypted) → press (compressed) → known archive → plain file.
+  let title = 'File'
+  let sub = formatSize(entry.size)
+  let tone: 'rose' | 'blue' | 'accent' | 'dim' = 'dim'
+
+  const depo = info?.module?.name === 'depo' ? info.module : null
+  const cf = info?.container
+
+  if (depo) {
+    const f = depo.fields ?? {}
+    const fused   = f['flag_fused'] === '1'
+    const timed   = f['flag_timed'] === '1'
+    const delayed = f['flag_delayed'] === '1'
+    const purge   = f['flag_purge'] === '1'
+    const policies: string[] = []
+    if (fused) {
+      const max = Number(f['max_fuses'] || 0)
+      const rem = Number(f['fuses_remaining'] || 0)
+      policies.push(rem === 0 ? 'fuses exhausted' : `fused ${rem}/${max}`)
+    }
+    if (timed)   policies.push(`timed ${f['valid_until_epoch'] || '?'} epochs`)
+    if (delayed) policies.push(`delayed ${f['valid_from_epoch'] || '?'} epochs`)
+    if (purge)   policies.push('purge on expiry')
+
+    title = 'Encrypted depo container'
+    sub = policies.length ? policies.join(' · ') : 'plain password lock'
+    tone = 'rose'
+  } else if (cf && cf.layers.includes('compressed')) {
+    title = 'Compressed cute container'
+    const ratio = cf.original_size > 0
+      ? ` · ${(cf.payload_size / cf.original_size * 100).toFixed(0)}%`
+      : ''
+    sub = `${formatSize(cf.original_size)} → ${formatSize(cf.payload_size)}${ratio}`
+    tone = 'blue'
+  } else if (cf && cf.layers.includes('encrypted')) {
+    title = 'Encrypted cute container'
+    sub = `payload ${formatSize(cf.payload_size)}`
+    tone = 'rose'
+  } else if (info && info.type !== 'unknown' && info.type !== 'raw') {
+    title = `cute container · ${info.type}`
+    sub = formatSize(info.file_size)
+    tone = 'accent'
+  } else if (ARCHIVE_EXTS.has(entry.ext)) {
+    title = `Archive (.${entry.ext})`
+    tone = 'blue'
+  }
+
+  const accentColor =
+    tone === 'rose'   ? 'var(--accent)'
+    : tone === 'blue' ? 'var(--accent-blue)'
+    : tone === 'accent' ? 'var(--accent)'
+    : 'var(--text)'
+
+  return (
+    <div style={{
+      padding: '12px 14px', marginBottom: 18, borderRadius: 10,
+      background: 'var(--surface)',
+      border: `1px solid ${tone === 'dim' ? 'var(--border)' : accentColor + '55'}`,
+    }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color: accentColor, marginBottom: 4 }}>
+        {title}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{sub}</div>
+    </div>
+  )
+}
+
+function DepoModuleSection({ mod }: { mod: ModuleInfo }) {
+  const f = mod.fields ?? {}
+  const num = (k: string) => (k in f ? Number(f[k]) : 0)
+  const bool = (k: string) => f[k] === '1'
+
+  const flags = {
+    timed:    bool('flag_timed'),
+    delayed:  bool('flag_delayed'),
+    fused:    bool('flag_fused'),
+    purge:    bool('flag_purge'),
+    keychain: bool('flag_keychain'),
+    remote:   bool('flag_remote_fuse'),
+  }
+  const maxFuses = num('max_fuses')
+  const fusesRem = num('fuses_remaining')
+  const epochLen = num('epoch_len_seconds')
+  const validFrom = num('valid_from_epoch')
+  const validUntil = num('valid_until_epoch')
+  const created = num('created_unix')
+  const vaultBytes = num('vault_bytes')
+  const payloadBytes = num('payload_bytes')
+  const ledger = num('ledger_entries')
+  const formatStr = f['format'] || 'cutedepo'
+
+  const badge = (label: string, on: boolean, tone: 'rose' | 'blue' | 'dim') => (
+    <span style={{
+      display: 'inline-block',
+      padding: '2px 8px', marginRight: 6, marginBottom: 4, borderRadius: 4,
+      fontSize: 10.5, fontWeight: 600, letterSpacing: '0.06em',
+      textTransform: 'uppercase',
+      background: !on ? 'transparent'
+        : tone === 'rose' ? 'rgba(251,111,146,0.16)'
+        : tone === 'blue' ? 'rgba(56,189,248,0.16)'
+        : 'rgba(255,255,255,0.06)',
+      color: !on ? 'var(--text-dim)'
+        : tone === 'rose' ? 'var(--accent)'
+        : tone === 'blue' ? 'var(--accent-blue)'
+        : 'var(--text)',
+      border: `1px solid ${on ? 'transparent' : 'var(--border)'}`,
+      opacity: on ? 1 : 0.45,
+    }}>{label}</span>
+  )
+
+  return (
+    <Section title={`depo · ${formatStr}`}>
+      <Field2 label="Lock policy">
+        <div style={{ marginTop: -2 }}>
+          {badge('TIMED',    flags.timed,    'blue')}
+          {badge('DELAYED',  flags.delayed,  'blue')}
+          {badge('FUSED',    flags.fused,    'rose')}
+          {badge('PURGE',    flags.purge,    'rose')}
+          {badge('KEYCHAIN', flags.keychain, 'dim')}
+          {badge('REMOTE',   flags.remote,   'dim')}
+          {!Object.values(flags).some(Boolean) && (
+            <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>
+              plain password lock — no policy
+            </span>
+          )}
+        </div>
+      </Field2>
+
+      {flags.fused && (
+        <Field2 label="Fuses remaining">
+          <span style={{ color: fusesRem === 0 ? 'var(--err)' : 'var(--accent)' }}>
+            {fusesRem}
+          </span>
+          <span style={{ color: 'var(--text-dim)' }}> / {maxFuses}</span>
+          {fusesRem === 0 && (
+            <span style={{ marginLeft: 10, color: 'var(--err)', fontSize: 11 }}>
+              file is permanently locked
+            </span>
+          )}
+        </Field2>
+      )}
+
+      {(flags.timed || flags.delayed) && (
+        <>
+          <Field2 label="Epoch length">
+            {epochLen}s
+            <span style={{ color: 'var(--text-dim)', marginLeft: 8 }}>
+              ({(epochLen / 3600).toFixed(2)} h)
+            </span>
+          </Field2>
+          {flags.delayed && validFrom > 0 && (
+            <Field2 label="Unlocks after">{validFrom} epochs</Field2>
+          )}
+          {flags.timed && validUntil > 0 && (
+            <Field2 label="Expires after">{validUntil} epochs</Field2>
+          )}
+        </>
+      )}
+
+      <Field2 label="KDF rounds">{num('kdf_rounds').toLocaleString()}</Field2>
+      <Field2 label="Vault size">{formatSize(vaultBytes)}</Field2>
+      <Field2 label="Payload size">{formatSize(payloadBytes)}</Field2>
+      <Field2 label="Ledger entries">{ledger}</Field2>
+      {created > 0 && <Field2 label="Created">{formatDate(created)}</Field2>}
+    </Section>
   )
 }
 
