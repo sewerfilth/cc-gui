@@ -1241,29 +1241,44 @@ function TabBar({ view, onChange }: {
   )
 }
 
+interface ContainerInfo {
+  version: number; type_code: number; type_name: string
+  layers: string[]; layer_flags: number
+  payload_size: number; original_size: number; meta_size: number
+  hash: string
+}
+interface ModuleInfo {
+  name: string; type: number; caps: number
+  text?: string
+  fields?: Record<string, string>
+}
+interface InfoJson {
+  type: string
+  file_size: number
+  container?: ContainerInfo
+  module?: ModuleInfo
+}
+
 function InspectorView({ entry, archive, cwd }: {
   entry: FsEntry | null
   archive: ArchiveBrowse | null
   cwd: string
 }) {
-  const [info, setInfo] = useState<{ loading: boolean; result: CcResult | null }>({ loading: false, result: null })
+  const [info, setInfo] = useState<{ loading: boolean; data: InfoJson | null; error: string | null }>(
+    { loading: false, data: null, error: null }
+  )
 
-  // Fetch cc_info for filesystem entries that look like containers/archives.
-  // Skip for archive entries (their `path` is virtual and would fail).
-  const target = !archive && entry && !entry.is_dir &&
-    (entry.ext === 'cute' || entry.ext === 'press' || ARCHIVE_EXTS.has(entry.ext))
-      ? entry.path
-      : null
+  // Try to fetch cc_info for any filesystem entry — info itself decides
+  // whether it's recognisable. Skip for archive entries (virtual path)
+  // and directories.
+  const target = !archive && entry && !entry.is_dir ? entry.path : null
 
   useEffect(() => {
-    if (!target) { setInfo({ loading: false, result: null }); return }
-    setInfo({ loading: true, result: null })
-    invoke<CcResult>('cc_info', { path: target })
-      .then((r) => setInfo({ loading: false, result: r }))
-      .catch((e) => setInfo({
-        loading: false,
-        result: { action: 'info', input: target, output: '', stdout: '', stderr: String(e), success: false },
-      }))
+    if (!target) { setInfo({ loading: false, data: null, error: null }); return }
+    setInfo({ loading: true, data: null, error: null })
+    invoke<InfoJson>('cc_info_json', { path: target })
+      .then((r) => setInfo({ loading: false, data: r, error: null }))
+      .catch((e) => setInfo({ loading: false, data: null, error: String(e) }))
   }, [target])
 
   // What are we inspecting? Three modes:
@@ -1328,22 +1343,78 @@ function InspectorView({ entry, archive, cwd }: {
             <Field2 label="Modified">{formatDate(entry.modified)}</Field2>
           </Section>
 
-          {target && (
-            <Section title="Container / archive header">
-              {info.loading && <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>Loading…</div>}
-              {info.result && (
-                <pre className="mono" style={{
-                  margin: 0, padding: '10px 12px', borderRadius: 6,
-                  background: 'var(--bg)',
-                  color: info.result.success ? 'var(--text)' : 'var(--err)',
-                  fontSize: 11.5, lineHeight: 1.55,
-                  whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-                  maxHeight: 360, overflow: 'auto',
-                }}>{info.result.success
-                  ? (info.result.stdout || '(no output)')
-                  : (info.result.stderr || 'failed')
-                }</pre>
-              )}
+          {target && info.loading && (
+            <Section title="Container metadata">
+              <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>Loading…</div>
+            </Section>
+          )}
+
+          {target && info.error && (
+            <Section title="Container metadata">
+              <div style={{ color: 'var(--err)', fontSize: 12 }}>{info.error}</div>
+            </Section>
+          )}
+
+          {target && info.data?.container && (
+            <Section title="cute container">
+              <Field2 label="Format version">v{info.data.container.version}</Field2>
+              <Field2 label="Content type">
+                {info.data.container.type_name}
+                <span style={{ color: 'var(--text-dim)', marginLeft: 6 }}>
+                  · code {info.data.container.type_code}
+                </span>
+              </Field2>
+              <Field2 label="Layers">
+                {info.data.container.layers.length === 0
+                  ? <span style={{ color: 'var(--text-dim)' }}>(none)</span>
+                  : info.data.container.layers.map((l, i) => (
+                      <span key={l} style={{
+                        display: 'inline-block',
+                        marginRight: 6, padding: '1px 8px', borderRadius: 4,
+                        fontSize: 10.5, fontWeight: 600, letterSpacing: '0.05em',
+                        textTransform: 'uppercase',
+                        background: l === 'compressed'
+                          ? 'rgba(56,189,248,0.16)' : 'rgba(251,111,146,0.16)',
+                        color: l === 'compressed'
+                          ? 'var(--accent-blue)' : 'var(--accent)',
+                      }}>{l}{i < info.data!.container!.layers.length - 1 ? '' : ''}</span>
+                    ))}
+              </Field2>
+              <Field2 label="Original size">{formatSize(info.data.container.original_size)}</Field2>
+              <Field2 label="Payload size">
+                {formatSize(info.data.container.payload_size)}
+                {info.data.container.original_size > 0 && (
+                  <span style={{ color: 'var(--text-dim)', marginLeft: 8 }}>
+                    {(info.data.container.payload_size / info.data.container.original_size * 100).toFixed(1)}%
+                  </span>
+                )}
+              </Field2>
+              <Field2 label="Meta size">{formatSize(info.data.container.meta_size)}</Field2>
+              <Field2 label="SHA3-256">
+                <span style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+                  {info.data.container.hash}
+                </span>
+              </Field2>
+            </Section>
+          )}
+
+          {target && info.data?.module && (
+            <Section title={`module: ${info.data.module.name}`}>
+              <Field2 label="Module type">{info.data.module.type}</Field2>
+              <Field2 label="Capabilities">0x{info.data.module.caps.toString(16).padStart(4, '0')}</Field2>
+              {info.data.module.fields && Object.entries(info.data.module.fields).map(([k, v]) => (
+                <Field2 key={k} label={k}>{v}</Field2>
+              ))}
+            </Section>
+          )}
+
+          {target && info.data && !info.data.container && !info.data.module && (
+            <Section title="Container metadata">
+              <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>
+                Detected as <span className="mono">{info.data.type}</span>
+                {' · '}{formatSize(info.data.file_size)}
+                {' — no further structured data.'}
+              </div>
             </Section>
           )}
         </>

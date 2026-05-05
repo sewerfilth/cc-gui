@@ -208,6 +208,48 @@ pub fn cc_archive_list(path: String) -> Result<ArchiveListing, String> {
     serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))
 }
 
+/* ── structured `info --json` ───────────────────────────────────────── */
+
+#[derive(Serialize, serde::Deserialize, Default)]
+pub struct ContainerInfo {
+    pub version: u32,
+    pub type_code: u32,
+    pub type_name: String,
+    pub layers: Vec<String>,
+    pub layer_flags: u32,
+    pub payload_size: u64,
+    pub original_size: u64,
+    pub meta_size: u32,
+    pub hash: String,
+}
+
+#[derive(Serialize, serde::Deserialize, Default)]
+pub struct ModuleInfo {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_code: i32,
+    pub caps: u32,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub fields: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Serialize, serde::Deserialize, Default)]
+pub struct InfoJson {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub file_size: u64,
+    pub container: Option<ContainerInfo>,
+    pub module: Option<ModuleInfo>,
+}
+
+#[tauri::command]
+pub fn cc_info_json(path: String) -> Result<InfoJson, String> {
+    let json = run_cli_capture(&["info", "--json", &path])?;
+    serde_json::from_str(&json).map_err(|e| format!("parse failed: {}", e))
+}
+
 /// Extract all entries to dest_dir, or one entry to dest_path if index is given.
 #[tauri::command]
 pub fn cc_archive_extract(
