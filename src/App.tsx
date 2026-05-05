@@ -1,6 +1,8 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
+import { listen } from '@tauri-apps/api/event'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
 
 interface FsEntry {
   name: string
@@ -371,6 +373,47 @@ export default function App() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [goUp, sortedListing, selection, onItemOpen, busy])
+
+  // Native menu events from the Tauri menu bar. Each item emits its id;
+  // we dispatch to the same handlers the in-app buttons / shortcuts use.
+  useEffect(() => {
+    const unlisten = listen<string>('menu', async (evt) => {
+      const id = evt.payload
+      switch (id) {
+        case 'file.open': {
+          const picked = await openDialog({ directory: true, multiple: false })
+          if (picked && typeof picked === 'string') void refresh(picked)
+          break
+        }
+        case 'file.reveal': {
+          const target = selection.size > 0 ? [...selection][0] : cwd
+          if (target) void invoke('cc_reveal', { path: target })
+          break
+        }
+        case 'file.archive':
+          if (selectedFiles.length >= 2) setArchiveOpen(true)
+          break
+        case 'view.toggle_hidden': setShowHidden((v) => !v); break
+        case 'view.sort_name': cycleSort('name'); break
+        case 'view.sort_size': cycleSort('size'); break
+        case 'view.sort_modified': cycleSort('modified'); break
+        case 'view.parent': goUp(); break
+        case 'view.reload': if (cwd) void refresh(cwd); break
+        case 'action.auto':       void runOnSelection('auto'); break
+        case 'action.compress':   void runOnSelection('compress'); break
+        case 'action.decompress': void runOnSelection('decompress'); break
+        case 'action.lock':       void runOnSelection('lock'); break
+        case 'action.unlock':     void runOnSelection('unlock'); break
+        case 'help.repo':
+          void invoke('cc_open_url', { url: 'https://github.com/sewerfilth/cc-gui' })
+          break
+        case 'help.releases':
+          void invoke('cc_open_url', { url: 'https://github.com/sewerfilth/cc-gui/releases' })
+          break
+      }
+    })
+    return () => { void unlisten.then((f) => f()) }
+  }, [cwd, refresh, goUp, cycleSort, selection, selectedFiles, runOnSelection])
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>

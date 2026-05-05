@@ -101,6 +101,29 @@ pub fn cc_path_exists(path: String) -> bool {
     std::path::Path::new(&path).exists()
 }
 
+/// Reveal a file or folder in macOS Finder.
+#[tauri::command]
+pub fn cc_reveal(path: String) -> Result<(), String> {
+    Command::new("open")
+        .args(["-R", &path])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("reveal failed: {}", e))
+}
+
+/// Open a URL in the user's default browser. Uses macOS `open`.
+#[tauri::command]
+pub fn cc_open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) URLs are allowed".into());
+    }
+    Command::new("open")
+        .arg(&url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("open failed: {}", e))
+}
+
 fn run_cli(action: &str, args: &[&str], input: &str, password: Option<&str>, explicit_output: Option<&str>) -> CcResult {
     let cli = cli_path();
     let mut cmd = Command::new(&cli);
