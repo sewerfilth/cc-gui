@@ -124,6 +124,42 @@ pub fn cc_open_url(url: String) -> Result<(), String> {
         .map_err(|e| format!("open failed: {}", e))
 }
 
+/// Open a file or folder with the macOS default handler.
+#[tauri::command]
+pub fn cc_open(path: String) -> Result<(), String> {
+    Command::new("open")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("open failed: {}", e))
+}
+
+/// Move files / folders to the macOS Trash. Reversible — user can restore
+/// from Finder. Returns the first error path if any item fails.
+#[tauri::command]
+pub fn cc_trash(paths: Vec<String>) -> Result<(), String> {
+    for p in &paths {
+        trash::delete(p).map_err(|e| format!("{}: {}", p, e))?;
+    }
+    Ok(())
+}
+
+/// Permanently remove files / folders. Recursive on directories. Not
+/// reversible — frontend must confirm beforehand.
+#[tauri::command]
+pub fn cc_delete(paths: Vec<String>) -> Result<(), String> {
+    for p in &paths {
+        let path = std::path::Path::new(p);
+        let r = if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        r.map_err(|e| format!("{}: {}", p, e))?;
+    }
+    Ok(())
+}
+
 fn run_cli(action: &str, args: &[&str], input: &str, password: Option<&str>, explicit_output: Option<&str>) -> CcResult {
     let cli = cli_path();
     let mut cmd = Command::new(&cli);
@@ -207,8 +243,15 @@ pub fn cc_auto(path: String) -> CcResult {
 }
 
 #[tauri::command]
-pub fn cc_compress(path: String) -> CcResult {
-    run_cli("compress", &["compress", &path], &path, None, None)
+pub fn cc_compress(path: String, level: Option<u32>) -> CcResult {
+    let level_arg = level.filter(|l| (1..=9).contains(l)).map(|l| l.to_string());
+    let mut args: Vec<&str> = vec!["compress"];
+    if let Some(ref l) = level_arg {
+        args.push("-l");
+        args.push(l);
+    }
+    args.push(&path);
+    run_cli("compress", &args, &path, None, None)
 }
 
 #[tauri::command]

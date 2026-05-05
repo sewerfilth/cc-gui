@@ -23,6 +23,9 @@ fn main() {
             cc::cc_path_exists,
             cc::cc_reveal,
             cc::cc_open_url,
+            cc::cc_open,
+            cc::cc_trash,
+            cc::cc_delete,
             fs::home_dir,
             fs::common_dirs,
             fs::list_dir,
@@ -56,9 +59,16 @@ fn main() {
                     .accelerator("CmdOrCtrl+O").build(h)?)
                 .item(&MenuItemBuilder::with_id("file.reveal", "Reveal Selection in Finder")
                     .accelerator("CmdOrCtrl+Shift+R").build(h)?)
+                .item(&MenuItemBuilder::with_id("file.inspect", "Inspect Selection")
+                    .accelerator("CmdOrCtrl+I").build(h)?)
                 .separator()
                 .item(&MenuItemBuilder::with_id("file.archive", "New Archive from Selection…")
                     .accelerator("CmdOrCtrl+Shift+N").build(h)?)
+                .separator()
+                .item(&MenuItemBuilder::with_id("file.trash", "Move to Trash")
+                    .accelerator("CmdOrCtrl+Backspace").build(h)?)
+                .item(&MenuItemBuilder::with_id("file.delete", "Delete Permanently…")
+                    .accelerator("CmdOrCtrl+Shift+Backspace").build(h)?)
                 .separator()
                 .item(&PredefinedMenuItem::close_window(h, None)?)
                 .build()?;
