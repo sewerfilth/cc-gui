@@ -444,7 +444,7 @@ export default function App() {
   }, [selectedFiles, password, cwd, refresh, askOverwrite])
 
   const runRefreshFuses = useCallback(async (params: {
-    path: string; refreshKey: string; newFuses?: number
+    path: string; refreshKey: string; newFuses?: number; force?: boolean
   }) => {
     setError(null)
     setBusy(true)
@@ -454,6 +454,7 @@ export default function App() {
         path: params.path,
         refreshKey: params.refreshKey,
         newFuses: params.newFuses ?? null,
+        force: params.force ?? false,
       })
       setHistory((h) => [{ ...res, id: ++entryId }, ...h].slice(0, 50))
       if (res.success) await refresh(cwd, params.path)
@@ -2028,22 +2029,36 @@ function LockPolicyModal({ files, busy, onSubmit, onCancel }: {
 function RefreshFusesModal({ path, busy, onSubmit, onCancel }: {
   path: string
   busy: boolean
-  onSubmit: (p: { path: string; refreshKey: string; newFuses?: number }) => void
+  onSubmit: (p: { path: string; refreshKey: string; newFuses?: number; force?: boolean }) => void
   onCancel: () => void
 }) {
   const [key, setKey] = useState('')
   const [overrideCount, setOverrideCount] = useState(false)
   const [val, setVal] = useState<number>(3)
+  const [force, setForce] = useState(false)
   const submit = () => {
-    if (!key) return
-    onSubmit({ path, refreshKey: key, newFuses: overrideCount ? Math.max(1, val) : undefined })
+    if (!key || !force) return
+    onSubmit({
+      path, refreshKey: key,
+      newFuses: overrideCount ? Math.max(1, val) : undefined,
+      force,
+    })
   }
   return (
-    <ModalShell title="Refresh fuses" onClose={onCancel} width={520}>
-      <div style={{ fontSize: 12.5, lineHeight: 1.6, marginBottom: 14 }}>
-        Refill the fuse vault on a fused .cute file using its delegated
-        refresh key. Requires the file to have been locked with
-        <span className="mono" style={{ marginLeft: 4 }}>--fuse-box --refresh-key</span>.
+    <ModalShell title="Refresh fuses" onClose={onCancel} width={560}>
+      <div style={{
+        marginBottom: 14, padding: '10px 12px', borderRadius: 6,
+        background: 'rgba(248,113,113,0.08)',
+        border: '1px solid rgba(248,113,113,0.4)',
+        color: 'var(--text)', fontSize: 12, lineHeight: 1.55,
+      }}>
+        <div style={{ color: 'var(--err)', fontWeight: 700, marginBottom: 4 }}>
+          ⚠ Refresh is incomplete in the current build
+        </div>
+        Rewrites the fuse chain header but doesn't re-encrypt the payload,
+        so the file <b>becomes unreadable</b> after refresh until the depo
+        internals are extended. Use only on files you have a backup of, or
+        when you understand the consequences.
       </div>
       <div style={{
         marginBottom: 14, padding: '6px 10px', borderRadius: 6,
@@ -2055,7 +2070,6 @@ function RefreshFusesModal({ path, busy, onSubmit, onCancel }: {
           {path}
         </span>
       </div>
-
       <Field label="Refresh key">
         <input type="password" value={key} onChange={(e) => setKey(e.target.value)}
           placeholder="the delegated refresh key set at lock time"
@@ -2075,9 +2089,22 @@ function RefreshFusesModal({ path, busy, onSubmit, onCancel }: {
         )}
       </Field>
 
+      <Field label="Force">
+        <label style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12.5, cursor: 'pointer' }}>
+          <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+          <span style={{ color: 'var(--err)' }}>
+            I understand the file will become unreadable until the upstream
+            re-encrypt is implemented. Proceed anyway.
+          </span>
+        </label>
+      </Field>
+
       <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 14 }}>
         <ActionButton label="Cancel" disabled={busy} onClick={onCancel} />
-        <ActionButton label="Refresh" tone="blue" disabled={busy || !key} onClick={submit} />
+        <ActionButton label="Refresh"
+          tone="rose"
+          disabled={busy || !key || !force}
+          onClick={submit} />
       </div>
     </ModalShell>
   )

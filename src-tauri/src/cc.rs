@@ -418,14 +418,22 @@ pub fn cc_lock(
 }
 
 /// Refill fuses on a fused depo file using its delegated refresh key.
+///
 /// Requires the file to have been locked with --fuse-box and --refresh-key.
+/// In the current upstream, this rewrites the fuse chain header but does NOT
+/// re-encrypt the payload — the file becomes unreadable. The CLI gates this
+/// behind --force; the GUI surfaces a Force-confirm checkbox before it'll
+/// proceed.
 #[tauri::command]
-pub fn cc_fuse_refresh(path: String, refresh_key: String, new_fuses: Option<u32>) -> CcResult {
+pub fn cc_fuse_refresh(path: String, refresh_key: String, new_fuses: Option<u32>, force: Option<bool>) -> CcResult {
     let nf = new_fuses.map(|v| v.to_string());
     let mut args: Vec<&str> = vec!["refresh", "-k", &refresh_key];
     if let Some(n) = nf.as_deref() {
         args.push("--fuses");
         args.push(n);
+    }
+    if force.unwrap_or(false) {
+        args.push("--force");
     }
     args.push(&path);
     run_cli("refresh", &args, &path, None, None)
